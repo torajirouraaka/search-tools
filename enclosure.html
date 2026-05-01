@@ -250,9 +250,13 @@
       </div>
       <div id="status" class="status"></div>
       <div class="note-list">
-        <div>取得方法: WordPress REST API <code>/wp-json/wp/v2/media</code> を使用</div>
-        <div>ページネーション対応: 最大100件ずつ取得し、複数ページをサポート</div>
-        <div>注意: メディアライブラリが公開されていない場合は取得できません</div>
+        <div>取得方法: 以下の順序で試行（フォールバック対応）</div>
+        <div style="padding-left: 1rem;">
+          <div>1. REST API <code>/wp-json/wp/v2/media</code> - メディアライブラリから直接取得</div>
+          <div>2. RSSフィード <code>/feed/</code> - enclosureタグから抽出</div>
+          <div>3. REST API <code>/wp-json/wp/v2/posts</code> - ポストのメタフィールドや埋め込みメディアから抽出</div>
+        </div>
+        <div>ページネーション対応: 最大100件ずつ取得し、複数ページを自動巡回</div>
       </div>
     </section>
 
@@ -350,6 +354,101 @@
       return "other";
     }
 
+    async function fetchText(url) {
+      const response = await fetch(url);
+      if (!response.ok) {
+        throw new Error(`取得に失敗しました: ${response.status}`);
+      }
+      return response.text();
+    }
+
+    function extractEnclosuresFromRss(xmlText) {
+      const parser = new DOMParser();
+      const doc = parser.parseFromString(xmlText, "text/xml");
+      const enclosures = new Set();
+      const items = doc.querySelectorAll("item, entry");
+
+      items.forEach((item) => {
+        Array.from(item.querySelectorAll("enclosure")).forEach((enc) => {
+          const url = enc.getAttribute("url");
+          const type = enc.getAttribute("type") || "unknown";
+          if (url) {
+            enclosures.add(JSON.stringify({ url, type }));
+          }
+        });
+      });
+
+      return Array.from(enclosures).map(e => JSON.parse(e)).map(e => ({
+        url: e.url,
+        title: "",
+        description: "",
+        mimeType: e.type,
+        type: getMediaType(e.type),
+        size: ""
+      }));
+    }
+
+    function extractEnclosuresFromPosts(posts) {
+      const enclosures = new Set();
+
+      posts.forEach((post) => {
+        // メタフィールドから
+        if (post.meta && post.meta.enclosure) {
+          const urls = Array.isArray(post.meta.enclosure) ? post.meta.enclosure : [post.meta.enclosure];
+          urls.forEach(url => {
+            if (url && typeof url === 'string') {
+              enclosures.add(JSON.stringify({
+                url,
+                title: post.title?.rendered || "",
+                description: post.excerpt?.rendered || "",
+                type: "unknown"
+              }));
+            }
+          });
+        }
+
+        // 添付ファイル情報から
+        if (post._links && post._links['wp:attachment']) {
+          post._links['wp:attachment'].forEach(attachment => {
+            if (attachment.href) {
+              enclosures.add(JSON.stringify({
+                url: attachment.href,
+                title: post.title?.rendered || "",
+                description: post.excerpt?.rendered || "",
+                type: "unknown"
+              }));
+            }
+          });
+        }
+
+        // 埋め込みメディアから
+        if (post._embedded && post._embedded['wp:featuredmedia']) {
+          post._embedded['wp:featuredmedia'].forEach(media => {
+            if (media.source_url) {
+              enclosures.add(JSON.stringify({
+                url: media.source_url,
+                title: media.title?.rendered || post.title?.rendered || "",
+                description: media.description?.rendered || "",
+                type: getMediaType(media.mime_type || "unknown")
+              }));
+            }
+          });
+        }
+      });
+
+      return Array.from(enclosures).map(e => {
+        const parsed = JSON.parse(e);
+        return {
+          url: parsed.url,
+          title: parsed.title,
+          description: parsed.description,
+          mimeType: parsed.type,
+          type: parsed.type,
+          size: ""
+        };
+      });
+    }
+
     function convertBytes(bytes) {
       if (bytes === 0) return "0 B";
       const k = 1024;
@@ -409,6 +508,105 @@
       renderEmpty("ここにEnclosure一覧が表示されます。");
     }
 
+    async function fetchFromMediaApi(siteUrl) {
+      setStatus("REST API (Media) から取得中...");
+      let allMedia = [];
+      let page = 1;
+      let totalPages = 1;
+
+      while (page <= totalPages) {
+        const restUrl = `${siteUrl}/wp-json/wp/v2/media?per_page=100&page=${page}`;
+        const proxyUrl = `${CORS_PROXY_ENDPOINT}${encodeURIComponent(restUrl)}`;
+        
+        const response = await fetch(proxyUrl);
+        if (!response.ok) {
+          throw new Error("REST API (Media) は利用できません");
+        }
+        
+        const text = await response.text();
+        const mediaData = JSON.parse(text);
+
+        if (Array.isArray(mediaData) && mediaData.length > 0) {
+          allMedia = allMedia.concat(mediaData);
+        } else if (!Array.isArray(mediaData)) {
+          throw new Error("予期しない応答形式です");
+        }
+
+        const totalHeader = response.headers.get("X-WP-Total");
+        if (totalHeader) {
+          totalPages = Math.ceil(totalHeader / 100);
+        }
+
+        if (mediaData.length < 100) break;
+        page++;
+      }
+
+      return allMedia.map(media => ({
+        url: media.source_url,
+        title: media.title?.rendered || media.title || "",
+        description: media.description?.rendered || media.description || "",
+        mimeType: media.mime_type || "unknown",
+        type: getMediaType(media.mime_type || "unknown"),
+        size: media.media_details?.filesize ? convertBytes(media.media_details.filesize) : ""
+      }));
+    }
+
+    async function fetchFromRssFeed(siteUrl) {
+      setStatus("RSSフィードから取得中...");
+      const feedUrl = `${siteUrl}/feed/?posts_per_rss=100`;
+      const proxyUrl = `${CORS_PROXY_ENDPOINT}${encodeURIComponent(feedUrl)}`;
+      
+      const xmlText = await fetchText(proxyUrl);
+      const enclosures = extractEnclosuresFromRss(xmlText);
+      
+      if (enclosures.length === 0) {
+        throw new Error("RSSフィードからenclosureが見つかりません");
+      }
+      
+      return enclosures;
+    }
+
+    async function fetchFromPostsApi(siteUrl) {
+      setStatus("REST API (Posts) から取得中...");
+      let allPosts = [];
+      let page = 1;
+      let totalPages = 1;
+
+      while (page <= totalPages) {
+        const restUrl = `${siteUrl}/wp-json/wp/v2/posts?per_page=100&page=${page}&_embed=1`;
+        const proxyUrl = `${CORS_PROXY_ENDPOINT}${encodeURIComponent(restUrl)}`;
+        
+        const response = await fetch(proxyUrl);
+        if (!response.ok) {
+          throw new Error("REST API (Posts) は利用できません");
+        }
+        
+        const text = await response.text();
+        const postsData = JSON.parse(text);
+
+        if (Array.isArray(postsData) && postsData.length > 0) {
+          allPosts = allPosts.concat(postsData);
+        } else if (!Array.isArray(postsData)) {
+          throw new Error("予期しない応答形式です");
+        }
+
+        const totalHeader = response.headers.get("X-WP-Total");
+        if (totalHeader) {
+          totalPages = Math.ceil(totalHeader / 100);
+        }
+
+        if (postsData.length < 100) break;
+        page++;
+      }
+
+      const enclosures = extractEnclosuresFromPosts(allPosts);
+      if (enclosures.length === 0) {
+        throw new Error("Posts APIからenclosureが見つかりません");
+      }
+      
+      return enclosures;
+    }
+
     async function fetchAllMedia() {
       fetchBtn.disabled = true;
 
@@ -416,61 +614,61 @@
         const siteUrl = normalizeSiteUrl();
         currentSiteUrl = siteUrl;
         updateMeta(siteUrl, 0);
-        renderEmpty("メディアライブラリを取得しています...");
-        setStatus("メディアライブラリを取得しています...");
+        renderEmpty("ファイルを取得しています...");
+        setStatus("ファイルを取得しています...");
 
-        let allMedia = [];
-        let page = 1;
-        let totalPages = 1;
+        let allEnclosuresData = [];
+        let successMethod = null;
 
-        while (page <= totalPages) {
-          setStatus(`メディア取得中... ${page}/${totalPages}ページ目`);
-          
-          const restUrl = `${siteUrl}/wp-json/wp/v2/media?per_page=100&page=${page}`;
-          const proxyUrl = `${CORS_PROXY_ENDPOINT}${encodeURIComponent(restUrl)}`;
-          
-          const response = await fetch(proxyUrl);
-          if (!response.ok) {
-            throw new Error(`取得に失敗しました: ${response.status}`);
+        // 方法1: REST API (Media)
+        try {
+          allEnclosuresData = await fetchFromMediaApi(siteUrl);
+          successMethod = "REST API (Media)";
+          setStatus(`成功: ${successMethod} から ${allEnclosuresData.length} 件取得しました。`);
+        } catch (error1) {
+          setStatus(`${error1.message}。別の方法を試します...`);
+
+          // 方法2: RSSフィード
+          try {
+            allEnclosuresData = await fetchFromRssFeed(siteUrl);
+            successMethod = "RSSフィード";
+            setStatus(`成功: ${successMethod} から ${allEnclosuresData.length} 件取得しました。`);
+          } catch (error2) {
+            setStatus(`${error2.message}。別の方法を試します...`);
+
+            // 方法3: REST API (Posts)
+            try {
+              allEnclosuresData = await fetchFromPostsApi(siteUrl);
+              successMethod = "REST API (Posts)";
+              setStatus(`成功: ${successMethod} から ${allEnclosuresData.length} 件取得しました。`);
+            } catch (error3) {
+              throw new Error(`すべての取得方法が失敗しました。\n- ${error1.message}\n- ${error2.message}\n- ${error3.message}`);
+            }
           }
-          
-          const text = await response.text();
-          const mediaData = JSON.parse(text);
-
-          if (Array.isArray(mediaData)) {
-            allMedia = allMedia.concat(mediaData);
-          }
-
-          const totalHeader = response.headers.get("X-WP-Total");
-          if (totalHeader) {
-            totalPages = Math.ceil(totalHeader / 100);
-          }
-
-          page++;
         }
 
         // フィルタリング
-        let filtered = allMedia.map(media => ({
-          url: media.source_url,
-          title: media.title?.rendered || media.title || "",
-          description: media.description?.rendered || media.description || "",
-          mimeType: media.mime_type || "unknown",
-          type: getMediaType(media.mime_type || "unknown"),
-          size: media.media_details?.filesize ? convertBytes(media.media_details.filesize) : ""
-        }));
-
+        let filtered = allEnclosuresData;
         if (fileType.value !== "all") {
           filtered = filtered.filter(f => f.type === fileType.value);
         }
 
-        allEnclosures = filtered;
+        // 重複を削除
+        const unique = new Map();
+        filtered.forEach(item => {
+          if (!unique.has(item.url)) {
+            unique.set(item.url, item);
+          }
+        });
+
+        allEnclosures = Array.from(unique.values());
         currentPage = 1;
         renderPage(currentPage);
         updateMeta(currentSiteUrl, allEnclosures.length);
-        setStatus(`完了: ${allEnclosures.length} 件のファイルを取得しました。`);
+        setStatus(`完了 (${successMethod}): ${allEnclosures.length} 件のファイルを取得しました。`);
       } catch (error) {
         const message = error instanceof Error ? error.message : String(error);
-        renderEmpty("メディアライブラリを取得できませんでした。URLやネットワーク状態を確認してください。");
+        renderEmpty("ファイルを取得できませんでした。URLやネットワーク状態を確認してください。");
         setStatus(`エラー: ${message}`, true);
       } finally {
         fetchBtn.disabled = false;

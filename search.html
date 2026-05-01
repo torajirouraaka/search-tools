@@ -298,8 +298,8 @@
       </div>
       <div id="status" class="status"></div>
       <div class="note-list">
-        <div>検索元: Bing の検索結果HTMLを CORSプロキシ経由で取得</div>
-        <div>WordPress判定: 候補ドメインの <code>wp-json</code> を CORSプロキシ経由で検証</div>
+        <div>検索元: Bing 検索結果 + WordPress.com 公開タグ投稿を併用</div>
+        <div>WordPress判定: 候補ドメインの <code>wp-json</code> とトップページHTMLを CORSプロキシ経由で検証</div>
         <div>注意: 検索順位と公開REST APIの可否に依存するため、すべてのWordPressサイトが見つかるわけではありません</div>
       </div>
     </section>
@@ -318,8 +318,9 @@
 
   <script>
     const BING_SEARCH_ENDPOINT = "https://www.bing.com/search";
+    const WORDPRESS_TAG_SEARCH_ENDPOINT = "https://public-api.wordpress.com/rest/v1.1/read/tags/";
     const CORS_PROXY_ENDPOINT = "https://api.codetabs.com/v1/proxy/?quest=";
-    const CACHE_PREFIX = "wp-site-search-v1:";
+    const CACHE_PREFIX = "wp-site-search-v2:";
 
     const keywordInput = document.getElementById("keywordInput");
     const queryMode = document.getElementById("queryMode");
@@ -405,6 +406,23 @@
       return response.text();
     }
 
+    async function fetchJson(url) {
+      const response = await fetch(url, {
+        headers: {
+          Accept: "application/json, text/plain;q=0.9, */*;q=0.8"
+        }
+      });
+      if (!response.ok) {
+        throw new Error(`取得に失敗しました: ${response.status} ${response.statusText}`);
+      }
+      const text = await response.text();
+      try {
+        return JSON.parse(text);
+      } catch (_) {
+        throw new Error("JSONの解析に失敗しました。");
+      }
+    }
+
     function decodeBingResultUrl(rawHref) {
       try {
         const normalized = String(rawHref).replace(/&amp;/g, "&");
@@ -439,6 +457,64 @@
       return parseBingSearchResults(html);
     }
 
+    function extractWordPressTagTerms(keyword) {
+      const normalized = keyword
+        .trim()
+        .replace(/\u3000/g, " ")
+        .replace(/[!"#$%&'()*+,./:;<=>?@[\\\]^_`{|}~]+/g, " ");
+
+      const parts = normalized.split(/\s+/).filter(Boolean);
+      const scriptTokens = normalized.match(/[\p{Script=Han}]+|[\p{Script=Hiragana}]+|[\p{Script=Katakana}ー]+|[A-Za-z0-9]+/gu) || [];
+      const terms = new Set();
+
+      [normalized, ...parts, ...scriptTokens].forEach((term) => {
+        const value = term.trim().toLowerCase();
+        if (value.length < 2) return;
+        terms.add(value);
+      });
+
+      return [...terms].slice(0, 6);
+    }
+
+    async function searchWordPressTagCandidates(keyword) {
+      const terms = extractWordPressTagTerms(keyword);
+      if (terms.length === 0) return [];
+
+      const settled = await Promise.allSettled(terms.map(async (term) => {
+        const searchUrl = `${WORDPRESS_TAG_SEARCH_ENDPOINT}${encodeURIComponent(term)}/posts?${new URLSearchParams({
+          number: "12"
+        }).toString()}`;
+        const { payload } = await fetchJsonWithFallback(searchUrl);
+
+        if (!Array.isArray(payload?.posts)) {
+          return [];
+        }
+
+        return payload.posts.map((post) => {
+          const pageUrl = post?.URL;
+          if (!pageUrl) return null;
+
+          try {
+            const url = new URL(pageUrl);
+            return {
+              link: pageUrl,
+              title: post?.title?.trim() || pageUrl,
+              description: String(post?.excerpt || post?.content || "")
+                .replace(/<[^>]+>/g, " ")
+                .replace(/\s+/g, " ")
+                .trim(),
+              source: `wpcom-tag:${term}`,
+              host: url.hostname
+            };
+          } catch (_) {
+            return null;
+          }
+        }).filter(Boolean);
+      }));
+
+      return dedupeByOrigin(settled.flatMap((entry) => entry.status === "fulfilled" ? entry.value : []));
+    }
+
     function parseBingSearchResults(html) {
       const parser = new DOMParser();
       const doc = parser.parseFromString(html, "text/html");
@@ -470,7 +546,8 @@
             pageUrl: item.link,
             title: item.title || origin,
             snippet: item.description || "",
-            host: url.hostname
+            host: item.host || url.hostname,
+            source: item.source || "bing"
           });
         } catch (_) {
           // Skip invalid result URLs.
@@ -479,47 +556,168 @@
       return [...map.values()];
     }
 
-    async function verifyWordPressSite(candidate) {
-      const targetUrl = `${candidate.origin}/wp-json/`;
-      const proxyUrl = `${CORS_PROXY_ENDPOINT}${encodeURIComponent(targetUrl)}`;
-      const response = await fetch(proxyUrl, {
-        headers: {
-          Accept: "application/json, text/plain;q=0.9, */*;q=0.8"
+    function getProxyUrl(targetUrl) {
+      return `${CORS_PROXY_ENDPOINT}${encodeURIComponent(targetUrl)}`;
+    }
+
+    async function fetchJsonWithFallback(url) {
+      const attempts = [
+        { label: "direct", url },
+        { label: "proxy", url: getProxyUrl(url) }
+      ];
+      const errors = [];
+
+      for (const attempt of attempts) {
+        try {
+          const payload = await fetchJson(attempt.url);
+          return {
+            payload,
+            transport: attempt.label
+          };
+        } catch (error) {
+          const message = error instanceof Error ? error.message : String(error);
+          errors.push(`${attempt.label}: ${message}`);
         }
-      });
-
-      if (!response.ok) {
-        return null;
       }
 
-      const text = await response.text();
-      let payload;
+      throw new Error(errors.join(" / "));
+    }
+
+    function summarizeSettledCandidateSources(candidateLists) {
+      const labels = ["Bing", "WordPressタグ"];
+      return candidateLists.map((entry, index) => {
+        if (entry.status === "fulfilled") {
+          return `${labels[index]} ${entry.value.length}件`;
+        }
+
+        const reason = entry.reason instanceof Error ? entry.reason.message : String(entry.reason);
+        return `${labels[index]} 失敗 (${reason})`;
+      }).join(" / ");
+    }
+
+    function createVerificationTargets(candidate) {
+      const targets = [];
+      const seen = new Set();
+
+      function push(url, kind) {
+        if (!url || seen.has(url)) return;
+        seen.add(url);
+        targets.push({ url, kind });
+      }
+
+      push(`${candidate.origin}/wp-json/`, "rest");
+      push(candidate.origin, "html");
+
       try {
-        payload = JSON.parse(text);
+        const originUrl = new URL(candidate.origin);
+        if (originUrl.protocol === "http:") {
+          const httpsOrigin = `https://${originUrl.host}`;
+          push(`${httpsOrigin}/wp-json/`, "rest");
+          push(httpsOrigin, "html");
+        }
       } catch (_) {
+        // Ignore invalid origins.
+      }
+
+      if (candidate.pageUrl) {
+        push(candidate.pageUrl, "html");
+      }
+
+      return targets;
+    }
+
+    function parseWordPressHtmlSignals(html) {
+      const text = String(html || "");
+      const hasSignature =
+        /\/wp-content\//i.test(text) ||
+        /\/wp-includes\//i.test(text) ||
+        /name=["']generator["'][^>]+content=["'][^"']*WordPress/i.test(text) ||
+        /https:\/\/api\.w\.org\//i.test(text) ||
+        /\/wp-json\/?/i.test(text);
+
+      if (!hasSignature) {
         return null;
       }
 
-      if (!payload || typeof payload !== "object") {
-        return null;
-      }
-
-      const hasWpSignature =
-        Array.isArray(payload.namespaces) ||
-        (payload.routes && typeof payload.routes === "object") ||
-        typeof payload.home === "string";
-
-      if (!hasWpSignature) {
-        return null;
-      }
+      const parser = new DOMParser();
+      const doc = parser.parseFromString(text, "text/html");
+      const title = doc.querySelector("title")?.textContent?.trim() || "";
+      const description =
+        doc.querySelector('meta[name="description"]')?.getAttribute("content")?.trim() ||
+        doc.querySelector('meta[property="og:description"]')?.getAttribute("content")?.trim() ||
+        "";
 
       return {
-        ...candidate,
-        siteName: payload.name || candidate.host,
-        siteDescription: payload.description || "",
-        homeUrl: payload.home || payload.url || candidate.origin,
-        namespacesCount: Array.isArray(payload.namespaces) ? payload.namespaces.length : 0
+        title,
+        description
       };
+    }
+
+    async function verifyWordPressSite(candidate) {
+      const targets = createVerificationTargets(candidate);
+
+      for (const target of targets) {
+        const response = await fetch(getProxyUrl(target.url), {
+          headers: {
+            Accept: target.kind === "rest"
+              ? "application/json, text/plain;q=0.9, */*;q=0.8"
+              : "text/html, text/plain;q=0.9, */*;q=0.8"
+          }
+        });
+
+        if (!response.ok) {
+          continue;
+        }
+
+        const text = await response.text();
+
+        if (target.kind === "rest") {
+          let payload;
+          try {
+            payload = JSON.parse(text);
+          } catch (_) {
+            payload = null;
+          }
+
+          const hasWpSignature =
+            payload &&
+            typeof payload === "object" &&
+            (
+              Array.isArray(payload.namespaces) ||
+              (payload.routes && typeof payload.routes === "object") ||
+              typeof payload.home === "string"
+            );
+
+          if (!hasWpSignature) {
+            continue;
+          }
+
+          return {
+            ...candidate,
+            siteName: payload.name || candidate.host,
+            siteDescription: payload.description || candidate.snippet || "",
+            homeUrl: payload.home || payload.url || candidate.origin,
+            namespacesCount: Array.isArray(payload.namespaces) ? payload.namespaces.length : 0,
+            verificationMethod: "wp-json"
+          };
+        }
+
+        const htmlSignals = parseWordPressHtmlSignals(text);
+        if (!htmlSignals) {
+          continue;
+        }
+
+        return {
+          ...candidate,
+          siteName: htmlSignals.title || candidate.title || candidate.host,
+          siteDescription: htmlSignals.description || candidate.snippet || "",
+          homeUrl: candidate.origin,
+          namespacesCount: 0,
+          verificationMethod: "html"
+        };
+      }
+
+      return null;
     }
 
     async function runWithConcurrency(items, worker, concurrency) {
@@ -548,14 +746,14 @@
 
     function renderResults(results) {
       if (results.length === 0) {
-        renderEmpty("WordPressサイトは見つかりませんでした。検索語を変えるか、\"WordPress寄りで検索\" を試してください。");
+        renderEmpty("WordPressサイトは見つかりませんでした。検索語を短くするか、別の単語で試してください。");
         return;
       }
 
       resultsEl.innerHTML = results.map((item) => `
         <article class="card">
           <div class="card-head">
-            <div class="badge">WordPress確認済み</div>
+            <div class="badge">${item.verificationMethod === "wp-json" ? "WordPress確認済み" : "WordPress推定"}</div>
             <h2><a href="${escapeHtml(item.pageUrl)}" target="_blank" rel="noopener noreferrer">${escapeHtml(item.title)}</a></h2>
             <div class="origin">${escapeHtml(item.origin)}</div>
           </div>
@@ -564,6 +762,7 @@
             <div class="kv">
               <div><strong>サイト名:</strong> ${escapeHtml(item.siteName)}</div>
               <div><strong>サイト説明:</strong> ${escapeHtml(item.siteDescription || "なし")}</div>
+              <div><strong>判定方法:</strong> ${escapeHtml(item.verificationMethod === "wp-json" ? "wp-json" : "トップページHTML")}</div>
               <div><strong>REST名前空間数:</strong> ${escapeHtml(String(item.namespacesCount))}</div>
             </div>
             <div class="links">
@@ -607,14 +806,23 @@
           return;
         }
 
-        const candidates = await searchCandidates(keyword, mode);
+        const candidateLists = await Promise.allSettled([
+          searchCandidates(keyword, mode),
+          searchWordPressTagCandidates(keyword)
+        ]);
+        const candidates = dedupeByOrigin(candidateLists.flatMap((entry) => (
+          entry.status === "fulfilled" ? entry.value : []
+        )));
+        const sourceSummary = summarizeSettledCandidateSources(candidateLists);
         updateMeta(keyword, candidates.length, 0);
 
         if (candidates.length === 0) {
-          renderEmpty("検索候補が見つかりませんでした。");
-          setStatus("候補ドメインを取得できませんでした。", true);
+          renderEmpty("検索候補が見つかりませんでした。検索語を短くするか、別の単語で試してください。");
+          setStatus(`候補ドメインを取得できませんでした。${sourceSummary}`, true);
           return;
         }
+
+        setStatus(`候補取得完了: ${sourceSummary}`);
 
         let verifiedCount = 0;
         const verifiedResults = (await runWithConcurrency(

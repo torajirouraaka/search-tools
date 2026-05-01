@@ -65,7 +65,7 @@
 
     .controls {
       display: grid;
-      grid-template-columns: minmax(0, 1fr) 120px 140px;
+      grid-template-columns: minmax(0, 1fr) 80px 100px 140px;
       gap: 10px;
       align-items: center;
     }
@@ -231,6 +231,10 @@
           <option value="50">50件</option>
           <option value="100">100件</option>
         </select>
+        <select id="fetchMethod" aria-label="取得方法">
+          <option value="feed">RSSフィード</option>
+          <option value="rest">REST API</option>
+        </select>
         <button id="fetchBtn">取得する</button>
       </div>
       <div class="inline-actions">
@@ -239,9 +243,9 @@
       </div>
       <div id="status" class="status"></div>
       <div class="note-list">
-        <div>フィードURL: 入力したURLの <code>/feed/</code> を自動的に試します</div>
-        <div>取得方法: CORSプロキシ経由でRSSフィードを解析し、<code>&lt;enclosure&gt;</code> タグから動画URLを抽出</div>
-        <div>注意: フィードが公開されていない場合や、CORS制限がある場合は取得できません</div>
+        <div>フィードURL: 入力したURLの <code>/feed/</code> または <code>/wp-json/wp/v2/posts</code> を自動的に試します</div>
+        <div>取得方法: CORSプロキシ経由でデータを解析し、<code>&lt;enclosure&gt;</code> タグまたはメタフィールドから動画URLを抽出</div>
+        <div>注意: フィード/APIが公開されていない場合や、CORS制限がある場合は取得できません</div>
       </div>
     </section>
 
@@ -266,6 +270,7 @@
 
     const siteInput = document.getElementById("siteInput");
     const postCount = document.getElementById("postCount");
+    const fetchMethod = document.getElementById("fetchMethod");
     const fetchBtn = document.getElementById("fetchBtn");
     const sampleBtn = document.getElementById("sampleBtn");
     const clearBtn = document.getElementById("clearBtn");
@@ -315,50 +320,61 @@
       }
     }
 
-    async function fetchText(url) {
+    async function fetchJson(url) {
       const response = await fetch(url, {
         headers: {
-          Accept: "text/xml, application/rss+xml, application/atom+xml, text/plain;q=0.9, */*;q=0.8"
+          Accept: "application/json, text/plain;q=0.9, */*;q=0.8"
         }
       });
       if (!response.ok) {
         throw new Error(`取得に失敗しました: ${response.status} ${response.statusText}`);
       }
-      return response.text();
+      const text = await response.text();
+      try {
+        return JSON.parse(text);
+      } catch (_) {
+        throw new Error("JSONの解析に失敗しました。");
+      }
     }
 
-    function parseFeed(xmlText) {
-      const parser = new DOMParser();
-      const doc = parser.parseFromString(xmlText, "text/xml");
-
-      // Check for parsing errors
-      const parseError = doc.querySelector("parsererror");
-      if (parseError) {
-        throw new Error("フィードの解析に失敗しました。");
-      }
-
+    function parseRest(jsonData) {
+      // REST APIのレスポンスをパースしてenclosureUrlsを抽出
+      // WordPress REST APIではenclosureはメタフィールドにある場合がある
       const items = [];
-      const itemElements = doc.querySelectorAll("item, entry");
-
-      itemElements.forEach((item) => {
-        const title = item.querySelector("title")?.textContent?.trim() || "";
-        const link = item.querySelector("link")?.textContent?.trim() ||
-                     item.querySelector("link")?.getAttribute("href")?.trim() || "";
-        const description = item.querySelector("description, summary, content")?.textContent?.trim() || "";
-        const pubDate = item.querySelector("pubDate, published, updated")?.textContent?.trim() || "";
-        const enclosureUrls = Array.from(item.querySelectorAll("enclosure")).map(el => el.getAttribute("url")).filter(Boolean);
-
-        if (title && link) {
+      jsonData.forEach((post) => {
+        const enclosureUrls = [];
+        if (post.meta && post.meta.enclosure) {
+          // enclosureがメタにある場合
+          enclosureUrls.push(post.meta.enclosure);
+        }
+        // 添付ファイルから動画を探す
+        if (post._embedded && post._embedded['wp:featuredmedia']) {
+          post._embedded['wp:featuredmedia'].forEach((media) => {
+            if (media.source_url && (media.source_url.includes('.mp4') || media.source_url.includes('.mov') || media.source_url.includes('.m4v'))) {
+              enclosureUrls.push(media.source_url);
+            }
+          });
+        }
+        // 記事本文からenclosureを探す（RSSのように）
+        if (post.content && post.content.rendered) {
+          const tempDiv = document.createElement('div');
+          tempDiv.innerHTML = post.content.rendered;
+          const enclosures = tempDiv.querySelectorAll('enclosure');
+          enclosures.forEach((enc) => {
+            const url = enc.getAttribute('url');
+            if (url) enclosureUrls.push(url);
+          });
+        }
+        if (enclosureUrls.length > 0) {
           items.push({
-            title,
-            link,
-            description: description.replace(/<[^>]+>/g, "").trim(),
-            pubDate,
+            title: post.title.rendered,
+            link: post.link,
+            description: post.excerpt ? post.excerpt.rendered.replace(/<[^>]+>/g, "") : "",
+            pubDate: post.date,
             enclosureUrls
           });
         }
       });
-
       return items;
     }
 
@@ -417,21 +433,30 @@
         const siteUrl = normalizeSiteUrl();
         currentSiteUrl = siteUrl;
         updateMeta(siteUrl, 0);
-        renderEmpty("フィードを取得しています...");
-        setStatus("フィードを取得しています...");
+        renderEmpty("データを取得しています...");
+        setStatus("データを取得しています...");
 
-        const feedUrl = `${siteUrl}/feed/?posts_per_rss=${postCount.value}`;
-        const proxyUrl = `${CORS_PROXY_ENDPOINT}${encodeURIComponent(feedUrl)}`;
-        const xmlText = await fetchText(proxyUrl);
+        let items = [];
+        if (fetchMethod.value === "feed") {
+          const feedUrl = `${siteUrl}/feed/?posts_per_rss=${postCount.value}`;
+          const proxyUrl = `${CORS_PROXY_ENDPOINT}${encodeURIComponent(feedUrl)}`;
+          const xmlText = await fetchText(proxyUrl);
+          items = parseFeed(xmlText);
+        } else {
+          const restUrl = `${siteUrl}/wp-json/wp/v2/posts?per_page=${postCount.value}&_embed`;
+          const proxyUrl = `${CORS_PROXY_ENDPOINT}${encodeURIComponent(restUrl)}`;
+          const jsonData = await fetchJson(proxyUrl);
+          items = parseRest(jsonData);
+        }
 
-        allItems = parseFeed(xmlText);
+        allItems = items;
         currentPage = 1;
         renderPage(currentSiteUrl, currentPage);
         updateMeta(currentSiteUrl, allItems.length);
         setStatus(`完了: ${allItems.length} 件の記事を取得しました。`);
       } catch (error) {
         const message = error instanceof Error ? error.message : String(error);
-        renderEmpty("フィードを取得できませんでした。URLやネットワーク状態を確認してください。");
+        renderEmpty("データを取得できませんでした。URLやネットワーク状態を確認してください。");
         setStatus(`エラー: ${message}`, true);
       } finally {
         fetchBtn.disabled = false;

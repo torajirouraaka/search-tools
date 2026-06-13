@@ -185,11 +185,11 @@
 <body>
   <div class="wrap">
     <h1>WordPress uploads メディア一覧</h1>
-    <p>WordPressサイトURLを入力すると、`wp/v2/media` から `uploads` 配下の画像/動画を一覧化します。</p>
+    <p>WordPressサイトURLを入力すると、`wp/v2/media` から `uploads` 配下の画像/動画を一覧化します。`/wp/` などサブディレクトリ設置のサイトにも対応しています。</p>
 
     <div class="panel">
       <div class="row">
-        <input id="siteUrl" type="url" placeholder="https://example.com" />
+        <input id="siteUrl" type="url" placeholder="https://example.com または https://example.com/wp" />
         <select id="maxPages" aria-label="ページ数">
           <option value="">ページ数: すべて</option>
         </select>
@@ -251,7 +251,22 @@
       }
       const withProtocol = /^https?:\/\//i.test(raw) ? raw : `https://${raw}`;
       const url = new URL(withProtocol);
-      return `${url.origin}`;
+
+      let path = url.pathname.replace(/\/+$/, "");
+      const nonBaseSuffixes = [
+        /\/wp-admin(?:\/.*)?$/i,
+        /\/wp-content(?:\/.*)?$/i,
+        /\/wp-includes(?:\/.*)?$/i,
+        /\/wp-json(?:\/.*)?$/i,
+        /\/feed$/i,
+        /\/index\.php$/i
+      ];
+      for (const pattern of nonBaseSuffixes) {
+        path = path.replace(pattern, "");
+      }
+      path = path.replace(/\/+$/, "");
+
+      return path ? `${url.origin}${path}` : url.origin;
     }
 
     function parseMaxPagesInput() {
@@ -332,7 +347,7 @@
 
     function createWpSiteError(status, statusText = "") {
       const suffix = status ? ` (${status}${statusText ? ` ${statusText}` : ""})` : "";
-      return new Error(`WordPressサイトではない可能性があります。REST API /wp-json/wp/v2/media を確認できませんでした${suffix}`);
+      return new Error(`WordPressサイトではない可能性があります。REST API（…/wp-json/wp/v2/media）を確認できませんでした${suffix}`);
     }
 
     function initPageOptions() {

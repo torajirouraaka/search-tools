@@ -49,7 +49,9 @@
       gap: 8px;
       flex-wrap: wrap;
     }
-    input[type="url"] {
+    input[type="url"],
+    input[type="search"],
+    input[type="text"] {
       flex: 1;
       min-width: 260px;
       padding: 10px 12px;
@@ -57,6 +59,10 @@
       border: 1px solid #374151;
       background: #0b1220;
       color: var(--text);
+    }
+    .filter input[type="search"] {
+      flex: 1;
+      min-width: 200px;
     }
     input[type="number"],
     select {
@@ -180,6 +186,15 @@
       color: #d1d5db;
       border: 1px solid rgba(156, 163, 175, 0.25);
     }
+    .empty-filter {
+      grid-column: 1 / -1;
+      padding: 24px;
+      border-radius: 10px;
+      border: 1px dashed #334155;
+      color: var(--muted);
+      text-align: center;
+      line-height: 1.6;
+    }
   </style>
 </head>
 <body>
@@ -209,14 +224,17 @@
 
     <div class="panel">
       <div class="meta">
-        <div>取得件数: <span id="count">0</span></div>
+        <div>表示件数: <span id="count">0</span> / 全 <span id="totalCount">0</span> 件</div>
         <div id="targetHost">対象: -</div>
       </div>
       <div class="filter" id="mediaFilter">
+        <input id="keywordFilter" type="search" placeholder="URL・ファイル名・タイトルで絞り込み" aria-label="キーワード絞り込み" />
         <label><input type="radio" name="mediaType" value="all" checked> すべて</label>
         <label><input type="radio" name="mediaType" value="image"> 画像のみ</label>
         <label><input type="radio" name="mediaType" value="video"> 動画のみ</label>
-        <label><input id="excludeUsed" type="checkbox"> 使用中を除く</label>
+        <label><input type="radio" name="usageFilter" value="all" checked> 使用状況: すべて</label>
+        <label><input type="radio" name="usageFilter" value="used"> 使用中のみ</label>
+        <label><input type="radio" name="usageFilter" value="unused"> 未使用のみ</label>
       </div>
       <div id="grid" class="grid"></div>
     </div>
@@ -232,12 +250,14 @@
     const statusEl = document.getElementById("status");
     const gridEl = document.getElementById("grid");
     const countEl = document.getElementById("count");
+    const totalCountEl = document.getElementById("totalCount");
     const targetHostEl = document.getElementById("targetHost");
     const mediaFilterEl = document.getElementById("mediaFilter");
-    const excludeUsedInput = document.getElementById("excludeUsed");
+    const keywordFilterInput = document.getElementById("keywordFilter");
     const CACHE_PREFIX = "wp-media-cache-v1:";
     let currentMedia = [];
     let renderedKeys = new Set();
+    let keywordFilterTimer = null;
 
     function setStatus(text, isError = false) {
       statusEl.textContent = text;
@@ -553,31 +573,96 @@
       return Number(item?.post || 0) > 0;
     }
 
-    function filterUsedMedia(items) {
-      if (!excludeUsedInput.checked) return items;
-      return items.filter((item) => !isUsedMedia(item));
-    }
-
-    function renderMediaList(items) {
-      gridEl.innerHTML = "";
-      renderedKeys = new Set();
-      items.forEach((item) => {
-        renderedKeys.add(getItemRenderKey(item));
-        gridEl.appendChild(createCard(item));
-      });
-      countEl.textContent = String(items.length);
-    }
-
     function getSelectedFilterType() {
       return document.querySelector('input[name="mediaType"]:checked')?.value || "all";
     }
 
+    function getSelectedUsageFilter() {
+      return document.querySelector('input[name="usageFilter"]:checked')?.value || "all";
+    }
+
+    function getMediaSearchText(item) {
+      const filename = (() => {
+        try {
+          return new URL(item.source_url).pathname.split("/").pop() || "";
+        } catch (_) {
+          return "";
+        }
+      })();
+      return [
+        item.source_url,
+        filename,
+        item.title?.rendered,
+        item.alt_text,
+        item.slug,
+        item.caption?.rendered
+      ]
+        .filter(Boolean)
+        .join(" ")
+        .toLowerCase();
+    }
+
+    function filterByKeyword(items) {
+      const keyword = keywordFilterInput.value.trim().toLowerCase();
+      if (!keyword) return items;
+      const terms = keyword.split(/\s+/).filter(Boolean);
+      return items.filter((item) => {
+        const haystack = getMediaSearchText(item);
+        return terms.every((term) => haystack.includes(term));
+      });
+    }
+
+    function filterByUsage(items) {
+      const usage = getSelectedUsageFilter();
+      if (usage === "used") return items.filter((item) => isUsedMedia(item));
+      if (usage === "unused") return items.filter((item) => !isUsedMedia(item));
+      return items;
+    }
+
+    function applyMediaFilters(items) {
+      return filterByKeyword(filterByUsage(filterMediaByType(items, getSelectedFilterType())));
+    }
+
+    function isFilterActive() {
+      return (
+        getSelectedFilterType() !== "all" ||
+        getSelectedUsageFilter() !== "all" ||
+        keywordFilterInput.value.trim() !== ""
+      );
+    }
+
+    function updateResultCounts(filteredCount, totalCount) {
+      countEl.textContent = String(filteredCount);
+      totalCountEl.textContent = String(totalCount);
+    }
+
+    function renderMediaList(items, totalCount = currentMedia.length) {
+      gridEl.innerHTML = "";
+      renderedKeys = new Set();
+
+      if (items.length === 0 && totalCount > 0) {
+        const empty = document.createElement("div");
+        empty.className = "empty-filter";
+        empty.textContent = isFilterActive()
+          ? "条件に一致するメディアがありません。フィルタ条件を変更してください。"
+          : "表示できるメディアがありません。";
+        gridEl.appendChild(empty);
+      } else {
+        items.forEach((item) => {
+          renderedKeys.add(getItemRenderKey(item));
+          gridEl.appendChild(createCard(item));
+        });
+      }
+
+      updateResultCounts(items.length, totalCount);
+    }
+
     function renderCurrentMediaByFilter(incremental = false) {
-      const selectedType = getSelectedFilterType();
-      const filteredMedia = filterUsedMedia(filterMediaByType(currentMedia, selectedType));
+      const filteredMedia = applyMediaFilters(currentMedia);
+      const totalCount = currentMedia.length;
 
       if (!incremental) {
-        renderMediaList(filteredMedia);
+        renderMediaList(filteredMedia, totalCount);
         return filteredMedia.length;
       }
 
@@ -593,7 +678,7 @@
       if (appendedCount > 0) {
         gridEl.appendChild(fragment);
       }
-      countEl.textContent = String(filteredMedia.length);
+      updateResultCounts(filteredMedia.length, totalCount);
       return filteredMedia.length;
     }
 
@@ -670,9 +755,10 @@
     async function loadMedia() {
       loadBtn.disabled = true;
       gridEl.innerHTML = "";
-      countEl.textContent = "0";
+      updateResultCounts(0, 0);
       currentMedia = [];
       renderedKeys = new Set();
+      keywordFilterInput.value = "";
 
       try {
         const baseUrl = normalizeBaseUrl(siteUrlInput.value);
@@ -695,10 +781,14 @@
         }
 
         const displayedCount = renderCurrentMediaByFilter();
+        const totalCount = currentMedia.length;
+        const countLabel = displayedCount === totalCount
+          ? `${displayedCount} 件`
+          : `${displayedCount} 件（全 ${totalCount} 件中）`;
         if (cached?.cachedAt) {
-          setStatus(`完了(キャッシュ): ${displayedCount} 件を表示しました。保存時刻 ${new Date(cached.cachedAt).toLocaleString()}`);
+          setStatus(`完了(キャッシュ): ${countLabel}を表示しました。保存時刻 ${new Date(cached.cachedAt).toLocaleString()}`);
         } else {
-          setStatus(`完了(新規取得): ${displayedCount} 件を表示しました。`);
+          setStatus(`完了(新規取得): ${countLabel}を表示しました。`);
         }
       } catch (err) {
         const message = err instanceof Error ? err.message : String(err);
@@ -711,16 +801,31 @@
       }
     }
 
-    loadBtn.addEventListener("click", loadMedia);
-    mediaFilterEl.addEventListener("change", () => {
+    function handleFilterChange() {
       try {
         const filteredCount = renderCurrentMediaByFilter();
         if (currentMedia.length > 0) {
-          setStatus(`フィルタ適用: ${filteredCount} 件を表示中`);
+          const suffix = isFilterActive()
+            ? `（全 ${currentMedia.length} 件中）`
+            : "";
+          setStatus(`フィルタ適用: ${filteredCount} 件を表示中${suffix}`);
         }
       } catch (err) {
         const message = err instanceof Error ? err.message : String(err);
         setStatus(`エラー: ${message}`, true);
+      }
+    }
+
+    loadBtn.addEventListener("click", loadMedia);
+    mediaFilterEl.addEventListener("change", handleFilterChange);
+    keywordFilterInput.addEventListener("input", () => {
+      clearTimeout(keywordFilterTimer);
+      keywordFilterTimer = setTimeout(handleFilterChange, 200);
+    });
+    keywordFilterInput.addEventListener("keydown", (event) => {
+      if (event.key === "Escape") {
+        keywordFilterInput.value = "";
+        handleFilterChange();
       }
     });
     yearFilterInput.addEventListener("change", () => {

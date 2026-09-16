@@ -340,11 +340,93 @@
       display: none;
     }
 
+    h2 {
+      margin: 0;
+      font-size: 1.05rem;
+      font-weight: 700;
+    }
+
+    .history-head {
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      gap: 12px;
+      flex-wrap: wrap;
+      margin-bottom: 8px;
+    }
+
+    .history-lead {
+      margin-bottom: 12px;
+      font-size: 0.92rem;
+    }
+
+    .history-list {
+      display: grid;
+      gap: 8px;
+      max-height: 320px;
+      overflow: auto;
+    }
+
+    .history-item {
+      display: grid;
+      grid-template-columns: minmax(0, 1fr) auto;
+      gap: 10px;
+      align-items: center;
+      padding: 12px;
+      border-radius: 12px;
+      border: 1px solid #1f2937;
+      background: #0b1220;
+      cursor: pointer;
+    }
+
+    .history-item.is-active {
+      border-color: #22d3ee;
+      box-shadow: 0 0 0 1px rgba(34, 211, 238, 0.35);
+    }
+
+    .history-item-main {
+      display: grid;
+      gap: 4px;
+      min-width: 0;
+    }
+
+    .history-item-title {
+      color: var(--text);
+      font-weight: 700;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+    }
+
+    .history-item-meta {
+      color: var(--muted);
+      font-size: 0.85rem;
+      display: flex;
+      flex-wrap: wrap;
+      gap: 8px;
+    }
+
+    .history-item-actions {
+      display: flex;
+      gap: 8px;
+      flex-wrap: wrap;
+    }
+
+    .history-head button,
+    .history-item-actions button {
+      width: auto;
+      padding: 8px 12px;
+      font-size: 0.85rem;
+    }
+
     @media (max-width: 760px) {
       .wrap { padding: 16px; }
       .controls,
       .controls-advanced { grid-template-columns: 1fr; }
       button { width: 100%; }
+      .history-head button { width: auto; }
+      .history-item { grid-template-columns: 1fr; }
+      .history-item-actions button { flex: 1; width: auto; }
     }
   </style>
 </head>
@@ -432,7 +514,19 @@
         <div>開始IDから指定件数分の連番IDを、<code>/wp-json/wp/v2/media/{ID}</code> で確認します。404（投稿などメディア以外のID）はスキップします。</div>
         <div>一覧のプレビューは画像なら medium / thumbnail、なければ <code>source_url</code> を使います。リンク先は常に <code>source_url</code> です。</div>
         <div>取得結果はローカルストレージに保存します。同じサイト・IDは次回以降 API を呼ばずキャッシュから表示します。</div>
+        <div>検索条件と一致したメディア一覧は、この端末の IndexedDB（利用できない場合はローカルストレージ）に検索履歴として保存します。</div>
         <div>同時チェック数 N・リクエスト間隔 T 秒の場合、約 N 件/T 秒で並列チェックします。キャッシュ済みのIDは待機しません。CORS 制限があるサイトでは取得できません。</div>
+      </div>
+    </section>
+
+    <section class="panel">
+      <div class="history-head">
+        <h2>検索履歴</h2>
+        <button id="clearHistoryBtn" class="ghost" type="button">履歴をすべて削除</button>
+      </div>
+      <p class="history-lead">検索・ID範囲チェックの条件と、そのときに見つかったメディア一覧をこの端末に保存します。履歴を選ぶと再表示できます。</p>
+      <div id="historyList" class="history-list">
+        <div class="empty">まだ検索履歴はありません。</div>
       </div>
     </section>
 
@@ -471,6 +565,8 @@
     const sampleBtn = document.getElementById("sampleBtn");
     const clearBtn = document.getElementById("clearBtn");
     const clearCacheBtn = document.getElementById("clearCacheBtn");
+    const clearHistoryBtn = document.getElementById("clearHistoryBtn");
+    const historyListEl = document.getElementById("historyList");
     const statusEl = document.getElementById("status");
     const progressBarEl = document.getElementById("progressBar");
     const progressFillEl = document.getElementById("progressFill");
@@ -489,10 +585,18 @@
     const MEDIA_FIELDS = "id,source_url,media_type,mime_type,media_details,title,alt_text,slug,caption";
     const SEARCH_PER_PAGE = 100;
     const CACHE_PREFIX = "wp-media-range-cache-v1:";
+    const HISTORY_DB_NAME = "wp-media-range-history";
+    const HISTORY_STORE = "entries";
+    const HISTORY_LS_KEY = "wp-media-range-history-v1";
+    const HISTORY_LIMIT = 50;
 
     let scanController = null;
     let foundIds = new Set();
+    let foundItems = [];
     let rateLimiter = null;
+    let historyCache = [];
+    let activeHistoryId = null;
+    let historyMutated = false;
 
     function getCacheKey(baseUrl, id) {
       return `${CACHE_PREFIX}${baseUrl}:${id}`;
@@ -589,6 +693,335 @@
         );
       } catch (_) {
         // Ignore storage failures (quota or private mode restrictions).
+      }
+    }
+
+    function createHistoryId() {
+      return `${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`;
+    }
+
+    function historyConditionKey(entry) {
+      const conditions = entry?.conditions || {};
+      if (entry?.type === "search") {
+        return [
+          "search",
+          conditions.siteUrl || "",
+          conditions.keyword || "",
+          String(conditions.rangeCount ?? "")
+        ].join("\0");
+      }
+      return [
+        "scan",
+        conditions.siteUrl || "",
+        String(conditions.rangeStart ?? ""),
+        String(conditions.rangeCount ?? "")
+      ].join("\0");
+    }
+
+    function openHistoryDb() {
+      return new Promise((resolve, reject) => {
+        if (!window.indexedDB) {
+          reject(new Error("IndexedDB unavailable"));
+          return;
+        }
+        const request = indexedDB.open(HISTORY_DB_NAME, 1);
+        request.onupgradeneeded = () => {
+          const db = request.result;
+          if (!db.objectStoreNames.contains(HISTORY_STORE)) {
+            db.createObjectStore(HISTORY_STORE, { keyPath: "id" });
+          }
+        };
+        request.onsuccess = () => resolve(request.result);
+        request.onerror = () => reject(request.error);
+      });
+    }
+
+    function loadHistoryFromLocalStorage() {
+      try {
+        const raw = localStorage.getItem(HISTORY_LS_KEY);
+        const parsed = raw ? JSON.parse(raw) : [];
+        return Array.isArray(parsed) ? parsed : [];
+      } catch (_) {
+        return [];
+      }
+    }
+
+    function saveHistoryToLocalStorage(entries) {
+      localStorage.setItem(HISTORY_LS_KEY, JSON.stringify(entries));
+    }
+
+    async function loadHistoryEntries() {
+      try {
+        const db = await openHistoryDb();
+        const entries = await new Promise((resolve, reject) => {
+          const tx = db.transaction(HISTORY_STORE, "readonly");
+          const request = tx.objectStore(HISTORY_STORE).getAll();
+          request.onsuccess = () => resolve(request.result || []);
+          request.onerror = () => reject(request.error);
+        });
+        db.close();
+        return entries
+          .filter((entry) => entry && Array.isArray(entry.items))
+          .sort((a, b) => String(b.createdAt || "").localeCompare(String(a.createdAt || "")));
+      } catch (_) {
+        return loadHistoryFromLocalStorage()
+          .filter((entry) => entry && Array.isArray(entry.items))
+          .sort((a, b) => String(b.createdAt || "").localeCompare(String(a.createdAt || "")));
+      }
+    }
+
+    async function persistHistoryEntries(entries) {
+      const trimmed = entries.slice(0, HISTORY_LIMIT);
+      try {
+        const db = await openHistoryDb();
+        await new Promise((resolve, reject) => {
+          const tx = db.transaction(HISTORY_STORE, "readwrite");
+          const store = tx.objectStore(HISTORY_STORE);
+          store.clear();
+          trimmed.forEach((entry) => store.put(entry));
+          tx.oncomplete = () => resolve();
+          tx.onerror = () => reject(tx.error);
+        });
+        db.close();
+        try {
+          localStorage.removeItem(HISTORY_LS_KEY);
+        } catch (_) {
+          // Ignore cleanup failures.
+        }
+      } catch (_) {
+        try {
+          saveHistoryToLocalStorage(trimmed);
+        } catch (error) {
+          throw new Error("履歴の保存に失敗しました。保存容量の上限に達している可能性があります。");
+        }
+      }
+    }
+
+    async function saveHistoryEntries(entries) {
+      let next = entries.slice(0, HISTORY_LIMIT);
+      if (next.length === 0) {
+        await persistHistoryEntries([]);
+        historyCache = [];
+        historyMutated = true;
+        return;
+      }
+      while (next.length > 0) {
+        try {
+          await persistHistoryEntries(next);
+          historyCache = next;
+          historyMutated = true;
+          return;
+        } catch (error) {
+          if (next.length <= 1) throw error;
+          next = next.slice(0, -1);
+        }
+      }
+    }
+
+    function describeHistoryEntry(entry) {
+      const conditions = entry?.conditions || {};
+      const siteUrl = conditions.siteUrl || "-";
+      if (entry?.type === "search") {
+        return {
+          badge: "検索",
+          title: conditions.keyword || "(キーワードなし)",
+          siteUrl
+        };
+      }
+
+      const start = Number(conditions.rangeStart);
+      const count = Number(conditions.rangeCount);
+      const hasRange = Number.isFinite(start) && Number.isFinite(count) && count > 0;
+      return {
+        badge: "ID範囲",
+        title: hasRange ? `${start} 〜 ${start + count - 1}` : `開始ID ${conditions.rangeStart || "-"}`,
+        siteUrl
+      };
+    }
+
+    function renderHistoryList() {
+      if (!historyListEl) return;
+      if (!historyCache.length) {
+        historyListEl.innerHTML = '<div class="empty">まだ検索履歴はありません。検索またはチェック完了後にここに残ります。</div>';
+        return;
+      }
+
+      historyListEl.innerHTML = "";
+      historyCache.forEach((entry) => {
+        const label = describeHistoryEntry(entry);
+        const item = document.createElement("div");
+        item.className = "history-item";
+        if (entry.id === activeHistoryId) {
+          item.classList.add("is-active");
+        }
+
+        const main = document.createElement("div");
+        main.className = "history-item-main";
+
+        const title = document.createElement("div");
+        title.className = "history-item-title";
+        title.textContent = `${label.badge} / ${label.title}`;
+        main.appendChild(title);
+
+        const meta = document.createElement("div");
+        meta.className = "history-item-meta";
+        const when = entry.createdAt ? new Date(entry.createdAt).toLocaleString() : "-";
+        const count = Number.isFinite(entry.itemCount) ? entry.itemCount : (entry.items || []).length;
+        meta.innerHTML = "";
+        [
+          label.siteUrl,
+          `${count.toLocaleString()} 件`,
+          when,
+          entry.aborted ? "途中停止" : ""
+        ].filter(Boolean).forEach((text) => {
+          const span = document.createElement("span");
+          span.textContent = text;
+          meta.appendChild(span);
+        });
+        main.appendChild(meta);
+
+        const actions = document.createElement("div");
+        actions.className = "history-item-actions";
+
+        const restoreBtn = document.createElement("button");
+        restoreBtn.type = "button";
+        restoreBtn.textContent = "表示";
+        restoreBtn.disabled = scanBtn.disabled;
+        restoreBtn.addEventListener("click", () => restoreHistoryEntry(entry));
+
+        const deleteBtn = document.createElement("button");
+        deleteBtn.type = "button";
+        deleteBtn.className = "ghost";
+        deleteBtn.textContent = "削除";
+        deleteBtn.disabled = scanBtn.disabled;
+        deleteBtn.addEventListener("click", (event) => {
+          event.stopPropagation();
+          deleteHistoryEntry(entry.id);
+        });
+
+        actions.appendChild(restoreBtn);
+        actions.appendChild(deleteBtn);
+        item.appendChild(main);
+        item.appendChild(actions);
+        item.addEventListener("click", (event) => {
+          if (event.target.closest("button")) return;
+          restoreHistoryEntry(entry);
+        });
+        historyListEl.appendChild(item);
+      });
+    }
+
+    async function addHistoryEntry(entry) {
+      const existing = await loadHistoryEntries();
+      const key = historyConditionKey(entry);
+      const withoutDup = existing.filter((item) => historyConditionKey(item) !== key);
+      await saveHistoryEntries([entry, ...withoutDup]);
+      renderHistoryList();
+    }
+
+    async function saveCurrentHistory(meta) {
+      const entry = {
+        id: createHistoryId(),
+        createdAt: new Date().toISOString(),
+        type: meta.type,
+        aborted: Boolean(meta.aborted),
+        conditions: {
+          siteUrl: meta.baseUrl,
+          keyword: meta.keyword || "",
+          rangeStart: meta.rangeStart ?? "",
+          rangeCount: meta.rangeCount ?? "",
+          concurrency: meta.concurrency ?? "",
+          requestInterval: meta.requestInterval ?? ""
+        },
+        items: foundItems.map((item) => slimMediaItem(item)),
+        itemCount: foundItems.length
+      };
+
+      try {
+        await addHistoryEntry(entry);
+        activeHistoryId = entry.id;
+        renderHistoryList();
+      } catch (error) {
+        const message = error instanceof Error ? error.message : "履歴の保存に失敗しました。";
+        setStatus(`${statusEl.textContent}（${message}）`.trim(), true);
+      }
+    }
+
+    function restoreHistoryEntry(entry) {
+      if (!entry || scanBtn.disabled) return;
+
+      const conditions = entry.conditions || {};
+      if (conditions.siteUrl) siteUrlInput.value = conditions.siteUrl;
+      keywordInput.value = conditions.keyword || "";
+      if (conditions.rangeStart !== undefined && conditions.rangeStart !== "") {
+        rangeStartInput.value = String(conditions.rangeStart);
+      }
+      if (conditions.rangeCount !== undefined && conditions.rangeCount !== "") {
+        rangeCountInput.value = String(conditions.rangeCount);
+      }
+      if (conditions.concurrency) {
+        concurrencyInput.value = String(conditions.concurrency);
+      }
+      if (conditions.requestInterval) {
+        requestIntervalInput.value = String(conditions.requestInterval);
+      }
+
+      activeHistoryId = entry.id;
+      targetHostEl.textContent = `対象: ${conditions.siteUrl || "-"}`;
+      foundIds = new Set();
+      foundItems = [];
+      gridEl.innerHTML = "";
+      resultFilterInput.value = "";
+      const allType = document.querySelector('input[name="mediaType"][value="all"]');
+      if (allType) allType.checked = true;
+      progressBarEl.classList.remove("active");
+      progressFillEl.style.width = "100%";
+
+      (entry.items || []).forEach((item) => appendFoundMedia(item));
+
+      if (foundIds.size === 0) {
+        gridEl.innerHTML = '<div class="empty">この履歴に保存されたメディアはありません。</div>';
+        foundCountEl.textContent = "0";
+      }
+
+      const itemCount = entry.items?.length || 0;
+      checkedCountEl.textContent = String(itemCount);
+      totalCountEl.textContent = String(itemCount);
+      cacheCountEl.textContent = String(itemCount);
+
+      const label = describeHistoryEntry(entry);
+      const when = entry.createdAt ? new Date(entry.createdAt).toLocaleString() : "";
+      const aborted = entry.aborted ? "（途中停止時点）" : "";
+      setStatus(`履歴から表示: ${label.badge}「${label.title}」 ${foundIds.size.toLocaleString()} 件${aborted}${when ? ` / ${when}` : ""}`);
+      renderHistoryList();
+    }
+
+    async function deleteHistoryEntry(id) {
+      const next = historyCache.filter((entry) => entry.id !== id);
+      try {
+        await saveHistoryEntries(next);
+        if (activeHistoryId === id) {
+          activeHistoryId = null;
+        }
+        renderHistoryList();
+        setStatus("選択した履歴を削除しました。");
+      } catch (error) {
+        const message = error instanceof Error ? error.message : String(error);
+        setStatus(`エラー: ${message}`, true);
+      }
+    }
+
+    async function clearHistory() {
+      const ok = window.confirm("保存されている検索履歴をすべて削除しますか？");
+      if (!ok) return;
+      try {
+        await saveHistoryEntries([]);
+        activeHistoryId = null;
+        renderHistoryList();
+        setStatus("検索履歴をすべて削除しました。");
+      } catch (error) {
+        const message = error instanceof Error ? error.message : String(error);
+        setStatus(`エラー: ${message}`, true);
       }
     }
 
@@ -921,6 +1354,7 @@
       const key = String(item.id ?? item.source_url);
       if (foundIds.has(key)) return;
       foundIds.add(key);
+      foundItems.push(slimMediaItem(item));
 
       if (gridEl.querySelector(".empty")) {
         gridEl.innerHTML = "";
@@ -939,6 +1373,8 @@
 
     function resetResults() {
       foundIds = new Set();
+      foundItems = [];
+      activeHistoryId = null;
       gridEl.innerHTML = '<div class="empty">チェック中...</div>';
       foundCountEl.textContent = "0";
       cacheCountEl.textContent = "0";
@@ -946,6 +1382,7 @@
       totalCountEl.textContent = "0";
       progressFillEl.style.width = "0%";
       resultFilterInput.value = "";
+      renderHistoryList();
     }
 
     function classifyFetchError(error, url) {
@@ -1158,6 +1595,10 @@
       requestIntervalInput.disabled = active;
       sampleBtn.disabled = active;
       clearCacheBtn.disabled = active;
+      clearHistoryBtn.disabled = active;
+      historyListEl.querySelectorAll("button").forEach((button) => {
+        button.disabled = active;
+      });
       progressBarEl.classList.toggle("active", active);
     }
 
@@ -1228,6 +1669,19 @@
         } else {
           setStatus(`チェック完了: ${foundIds.size.toLocaleString()} 件のメディアが見つかりました。（${cacheLabel}）`);
         }
+
+        if (!signal.aborted || foundItems.length > 0) {
+          await saveCurrentHistory({
+            type: "scan",
+            baseUrl,
+            keyword: keywordInput.value.trim(),
+            rangeStart: start,
+            rangeCount: count,
+            concurrency,
+            requestInterval: requestIntervalMs,
+            aborted: signal.aborted
+          });
+        }
       } catch (err) {
         const message = err instanceof Error ? err.message : String(err);
         setStatus(`エラー: ${message}`, true);
@@ -1280,6 +1734,15 @@
             gridEl.innerHTML = '<div class="empty">キャッシュ上に一致するメディアはありません。</div>';
           }
           setStatus(`完了(キャッシュ): ${foundIds.size.toLocaleString()} 件を表示しました。${cachedAt}`);
+          await saveCurrentHistory({
+            type: "search",
+            baseUrl,
+            keyword,
+            rangeStart: rangeStartInput.value.trim(),
+            rangeCount: limit,
+            requestInterval: requestIntervalMs,
+            concurrency: parseInt(concurrencyInput.value, 10)
+          });
           return;
         }
 
@@ -1339,6 +1802,19 @@
         } else {
           setStatus(`検索完了: ${foundIds.size.toLocaleString()} 件のメディアが見つかりました。（${cacheLabel}）`);
         }
+
+        if (!signal.aborted || foundItems.length > 0) {
+          await saveCurrentHistory({
+            type: "search",
+            baseUrl,
+            keyword,
+            rangeStart: rangeStartInput.value.trim(),
+            rangeCount: limit,
+            requestInterval: requestIntervalMs,
+            concurrency: parseInt(concurrencyInput.value, 10),
+            aborted: signal.aborted
+          });
+        }
       } catch (err) {
         const message = err instanceof Error ? err.message : String(err);
         setStatus(`エラー: ${message}`, true);
@@ -1373,6 +1849,8 @@
     function clearResults() {
       stopScan();
       foundIds = new Set();
+      foundItems = [];
+      activeHistoryId = null;
       gridEl.innerHTML = '<div class="empty">ドメインと開始ID・件数、または検索キーワードを入力してください。</div>';
       foundCountEl.textContent = "0";
       cacheCountEl.textContent = "0";
@@ -1386,6 +1864,7 @@
       if (allType) allType.checked = true;
       setStatus("");
       setScanning(false);
+      renderHistoryList();
     }
 
     function clearCache() {
@@ -1409,6 +1888,7 @@
     sampleBtn.addEventListener("click", fillSample);
     clearBtn.addEventListener("click", clearResults);
     clearCacheBtn.addEventListener("click", clearCache);
+    clearHistoryBtn.addEventListener("click", clearHistory);
     resultFilterInput.addEventListener("input", applyResultFilter);
     mediaFilterEl.addEventListener("change", applyResultFilter);
     resultFilterInput.addEventListener("keydown", (event) => {
@@ -1434,6 +1914,20 @@
         }
       });
     });
+
+    (async function initHistory() {
+      try {
+        const entries = await loadHistoryEntries();
+        if (!historyMutated) {
+          historyCache = entries;
+        }
+      } catch (_) {
+        if (!historyMutated) {
+          historyCache = [];
+        }
+      }
+      renderHistoryList();
+    })();
   </script>
 </body>
 </html>

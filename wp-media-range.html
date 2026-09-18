@@ -360,6 +360,34 @@
       font-size: 0.92rem;
     }
 
+    .history-search {
+      display: grid;
+      gap: 6px;
+      margin-bottom: 12px;
+    }
+
+    .history-search label {
+      font-size: 0.9rem;
+      color: var(--muted);
+    }
+
+    .history-search-row {
+      display: flex;
+      gap: 10px;
+      flex-wrap: wrap;
+      align-items: stretch;
+    }
+
+    .history-search-row input {
+      flex: 1;
+      min-width: 200px;
+    }
+
+    .history-search-row button {
+      width: auto;
+      padding: 12px 16px;
+    }
+
     .history-list {
       display: grid;
       gap: 8px;
@@ -424,7 +452,8 @@
       .controls,
       .controls-advanced { grid-template-columns: 1fr; }
       button { width: 100%; }
-      .history-head button { width: auto; }
+      .history-head button,
+      .history-search-row button { width: auto; }
       .history-item { grid-template-columns: 1fr; }
       .history-item-actions button { flex: 1; width: auto; }
     }
@@ -498,6 +527,7 @@
       <div class="actions">
         <button id="scanBtn" type="button">チェック開始</button>
         <button id="searchBtn" type="button">検索</button>
+        <button id="historySearchFromKeywordBtn" class="ghost" type="button">履歴から検索</button>
         <button id="stopBtn" class="danger" type="button" disabled>停止</button>
         <button id="sampleBtn" class="ghost" type="button">サンプルを入れる</button>
         <button id="clearBtn" class="ghost" type="button">結果をクリア</button>
@@ -514,7 +544,7 @@
         <div>開始IDから指定件数分の連番IDを、<code>/wp-json/wp/v2/media/{ID}</code> で確認します。404（投稿などメディア以外のID）はスキップします。</div>
         <div>一覧のプレビューは画像なら medium / thumbnail、なければ <code>source_url</code> を使います。リンク先は常に <code>source_url</code> です。</div>
         <div>取得結果はローカルストレージに保存します。同じサイト・IDは次回以降 API を呼ばずキャッシュから表示します。</div>
-        <div>検索条件と一致したメディア一覧は、この端末の IndexedDB（利用できない場合はローカルストレージ）に検索履歴として保存します。</div>
+        <div>検索条件と一致したメディア一覧は、この端末の IndexedDB（利用できない場合はローカルストレージ）に検索履歴として保存します。保存済みのメディアはファイル名で履歴から再検索できます。</div>
         <div>同時チェック数 N・リクエスト間隔 T 秒の場合、約 N 件/T 秒で並列チェックします。キャッシュ済みのIDは待機しません。CORS 制限があるサイトでは取得できません。</div>
       </div>
     </section>
@@ -524,7 +554,19 @@
         <h2>検索履歴</h2>
         <button id="clearHistoryBtn" class="ghost" type="button">履歴をすべて削除</button>
       </div>
-      <p class="history-lead">検索・ID範囲チェックの条件と、そのときに見つかったメディア一覧をこの端末に保存します。履歴を選ぶと再表示できます。</p>
+      <p class="history-lead">検索・ID範囲チェックの条件と、そのときに見つかったメディア一覧をこの端末に保存します。履歴を選ぶと再表示できます。ファイル名を指定すると、保存済みメディアから直接探せます。</p>
+      <div class="history-search">
+        <label for="historyFilenameInput">ファイル名で履歴を検索</label>
+        <div class="history-search-row">
+          <input
+            id="historyFilenameInput"
+            type="search"
+            placeholder="保存済みメディアのファイル名（例: kansai-onsen.jpg）"
+            aria-label="ファイル名で履歴を検索"
+          />
+          <button id="historySearchBtn" type="button">履歴から検索</button>
+        </div>
+      </div>
       <div id="historyList" class="history-list">
         <div class="empty">まだ検索履歴はありません。</div>
       </div>
@@ -561,11 +603,14 @@
     const requestIntervalInput = document.getElementById("requestInterval");
     const scanBtn = document.getElementById("scanBtn");
     const searchBtn = document.getElementById("searchBtn");
+    const historySearchFromKeywordBtn = document.getElementById("historySearchFromKeywordBtn");
     const stopBtn = document.getElementById("stopBtn");
     const sampleBtn = document.getElementById("sampleBtn");
     const clearBtn = document.getElementById("clearBtn");
     const clearCacheBtn = document.getElementById("clearCacheBtn");
     const clearHistoryBtn = document.getElementById("clearHistoryBtn");
+    const historyFilenameInput = document.getElementById("historyFilenameInput");
+    const historySearchBtn = document.getElementById("historySearchBtn");
     const historyListEl = document.getElementById("historyList");
     const statusEl = document.getElementById("status");
     const progressBarEl = document.getElementById("progressBar");
@@ -846,8 +891,27 @@
         return;
       }
 
+      const terms = getHistoryFilenameTerms();
+      const visibleEntries = terms.length
+        ? historyCache
+            .map((entry) => ({
+              entry,
+              matchCount: (entry.items || []).filter((item) => mediaFilenameMatches(item, terms)).length
+            }))
+            .filter((row) => row.matchCount > 0)
+        : historyCache.map((entry) => ({ entry, matchCount: 0 }));
+
+      if (!visibleEntries.length) {
+        const emptyEl = document.createElement("div");
+        emptyEl.className = "empty";
+        emptyEl.textContent = `検索履歴に「${terms.join(" ")}」を含むファイル名はありません。`;
+        historyListEl.innerHTML = "";
+        historyListEl.appendChild(emptyEl);
+        return;
+      }
+
       historyListEl.innerHTML = "";
-      historyCache.forEach((entry) => {
+      visibleEntries.forEach(({ entry, matchCount }) => {
         const label = describeHistoryEntry(entry);
         const item = document.createElement("div");
         item.className = "history-item";
@@ -871,6 +935,7 @@
         [
           label.siteUrl,
           `${count.toLocaleString()} 件`,
+          matchCount > 0 ? `ファイル名一致 ${matchCount.toLocaleString()} 件` : "",
           when,
           entry.aborted ? "途中停止" : ""
         ].filter(Boolean).forEach((text) => {
@@ -909,6 +974,54 @@
         });
         historyListEl.appendChild(item);
       });
+    }
+
+    function searchHistoryByFilename(query) {
+      if (scanBtn.disabled) return;
+
+      if (query !== undefined) {
+        historyFilenameInput.value = String(query);
+      }
+
+      const terms = getHistoryFilenameTerms();
+      if (!terms.length) {
+        renderHistoryList();
+        setStatus("ファイル名を入力してください。", true);
+        return;
+      }
+
+      const matches = collectHistoryFilenameMatches(terms);
+      activeHistoryId = null;
+      foundIds = new Set();
+      foundItems = [];
+      gridEl.innerHTML = "";
+      resultFilterInput.value = "";
+      const allType = document.querySelector('input[name="mediaType"][value="all"]');
+      if (allType) allType.checked = true;
+      progressBarEl.classList.remove("active");
+      progressFillEl.style.width = "100%";
+      targetHostEl.textContent = "対象: 検索履歴";
+
+      matches.forEach(({ item }) => appendFoundMedia(item));
+
+      const found = foundIds.size;
+      checkedCountEl.textContent = String(found);
+      totalCountEl.textContent = String(found);
+      cacheCountEl.textContent = String(found);
+
+      if (found === 0) {
+        gridEl.innerHTML = '<div class="empty">検索履歴に一致するファイル名はありません。</div>';
+        foundCountEl.textContent = "0";
+        setStatus(`履歴からファイル名検索: 「${terms.join(" ")}」 0 件`);
+      } else {
+        setStatus(`履歴からファイル名検索: 「${terms.join(" ")}」 ${found.toLocaleString()} 件`);
+      }
+      renderHistoryList();
+    }
+
+    function searchHistoryFromKeyword() {
+      const query = keywordInput.value.trim() || historyFilenameInput.value.trim();
+      searchHistoryByFilename(query);
     }
 
     async function addHistoryEntry(entry) {
@@ -971,7 +1084,7 @@
       foundIds = new Set();
       foundItems = [];
       gridEl.innerHTML = "";
-      resultFilterInput.value = "";
+      resultFilterInput.value = getHistoryFilenameTerms().join(" ");
       const allType = document.querySelector('input[name="mediaType"][value="all"]');
       if (allType) allType.checked = true;
       progressBarEl.classList.remove("active");
@@ -1177,13 +1290,53 @@
       }
     }
 
-    function getMediaSearchText(item) {
-      let filename = "";
+    function getMediaFilename(item) {
+      if (!item?.source_url) return "";
       try {
-        filename = decodeURIComponent(new URL(item.source_url).pathname.split("/").pop() || "");
+        const raw = new URL(item.source_url).pathname.split("/").pop() || "";
+        let decoded = raw;
+        try {
+          decoded = decodeURIComponent(raw);
+        } catch (_) {
+          decoded = raw;
+        }
+        return `${raw}\n${decoded}`.toLowerCase();
       } catch (_) {
-        filename = "";
+        return "";
       }
+    }
+
+    function parseSearchTerms(value) {
+      return String(value || "").trim().toLowerCase().split(/\s+/).filter(Boolean);
+    }
+
+    function mediaFilenameMatches(item, terms) {
+      if (!terms.length) return true;
+      const filename = getMediaFilename(item);
+      return terms.every((term) => filename.includes(term));
+    }
+
+    function getHistoryFilenameTerms() {
+      return parseSearchTerms(historyFilenameInput.value);
+    }
+
+    function collectHistoryFilenameMatches(terms) {
+      const seen = new Set();
+      const matches = [];
+      historyCache.forEach((entry) => {
+        (entry.items || []).forEach((item) => {
+          if (!mediaFilenameMatches(item, terms)) return;
+          const key = String(item.source_url || `${entry?.conditions?.siteUrl || ""}::${item.id}`);
+          if (seen.has(key)) return;
+          seen.add(key);
+          matches.push({ item, entry });
+        });
+      });
+      return matches;
+    }
+
+    function getMediaSearchText(item) {
+      const filename = getMediaFilename(item);
 
       return [
         item.source_url,
@@ -1586,6 +1739,9 @@
     function setScanning(active) {
       scanBtn.disabled = active;
       searchBtn.disabled = active;
+      historySearchFromKeywordBtn.disabled = active;
+      historySearchBtn.disabled = active;
+      historyFilenameInput.disabled = active;
       stopBtn.disabled = !active;
       siteUrlInput.disabled = active;
       keywordInput.disabled = active;
@@ -1884,6 +2040,18 @@
 
     scanBtn.addEventListener("click", startScan);
     searchBtn.addEventListener("click", startSearch);
+    historySearchFromKeywordBtn.addEventListener("click", searchHistoryFromKeyword);
+    historySearchBtn.addEventListener("click", () => searchHistoryByFilename());
+    historyFilenameInput.addEventListener("input", renderHistoryList);
+    historyFilenameInput.addEventListener("keydown", (event) => {
+      if (event.key === "Enter" && !historySearchBtn.disabled) {
+        searchHistoryByFilename();
+      }
+      if (event.key === "Escape") {
+        historyFilenameInput.value = "";
+        renderHistoryList();
+      }
+    });
     stopBtn.addEventListener("click", stopScan);
     sampleBtn.addEventListener("click", fillSample);
     clearBtn.addEventListener("click", clearResults);

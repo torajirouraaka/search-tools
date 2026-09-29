@@ -1,0 +1,1078 @@
+<!doctype html>
+<html lang="ja">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>サイト内画像一覧</title>
+  <style>
+    :root {
+      --bg: #0f172a;
+      --panel: #111827;
+      --panel-border: #1f2937;
+      --text: #e5e7eb;
+      --muted: #9ca3af;
+      --primary: #22d3ee;
+      --danger: #f87171;
+    }
+
+    * { box-sizing: border-box; }
+    body {
+      margin: 0;
+      font-family: sans-serif;
+      background: linear-gradient(160deg, #020617, #0f172a 40%, #1e293b);
+      color: var(--text);
+      min-height: 100vh;
+    }
+    .wrap {
+      max-width: 1100px;
+      margin: 0 auto;
+      padding: 24px;
+    }
+    h1 {
+      font-size: 1.5rem;
+      margin: 0 0 12px;
+    }
+    p {
+      margin: 0 0 16px;
+      color: var(--muted);
+      line-height: 1.7;
+    }
+    .panel {
+      background: rgba(17, 24, 39, 0.85);
+      border: 1px solid var(--panel-border);
+      border-radius: 12px;
+      padding: 16px;
+      margin-bottom: 16px;
+      backdrop-filter: blur(4px);
+    }
+    .row {
+      display: flex;
+      gap: 8px;
+      flex-wrap: wrap;
+    }
+    input[type="url"],
+    input[type="search"],
+    select {
+      padding: 10px 12px;
+      border-radius: 8px;
+      border: 1px solid #374151;
+      background: #0b1220;
+      color: var(--text);
+    }
+    input[type="url"] {
+      flex: 1;
+      min-width: 260px;
+    }
+    select { width: auto; }
+    button {
+      padding: 10px 14px;
+      border: 0;
+      border-radius: 8px;
+      background: var(--primary);
+      color: #082f49;
+      font-weight: 700;
+      cursor: pointer;
+    }
+    button.secondary {
+      background: #1f2937;
+      color: var(--text);
+      border: 1px solid #374151;
+    }
+    button:disabled {
+      opacity: 0.7;
+      cursor: not-allowed;
+    }
+    .inline-check {
+      display: inline-flex;
+      align-items: center;
+      gap: 6px;
+      color: var(--muted);
+      cursor: pointer;
+    }
+    .status {
+      margin-top: 12px;
+      color: var(--muted);
+      min-height: 20px;
+      line-height: 1.6;
+    }
+    .status.error { color: var(--danger); }
+    .meta {
+      display: flex;
+      justify-content: space-between;
+      gap: 8px;
+      flex-wrap: wrap;
+      color: var(--muted);
+      margin-bottom: 12px;
+    }
+    .filter {
+      display: flex;
+      gap: 12px;
+      align-items: center;
+      flex-wrap: wrap;
+      margin-bottom: 12px;
+    }
+    .filter input[type="search"] {
+      flex: 1;
+      min-width: 220px;
+    }
+    .filter label {
+      display: inline-flex;
+      align-items: center;
+      gap: 6px;
+      cursor: pointer;
+    }
+    .grid {
+      display: grid;
+      grid-template-columns: repeat(auto-fill, minmax(180px, 1fr));
+      gap: 10px;
+    }
+    .card {
+      background: #0b1220;
+      border: 1px solid #1f2937;
+      border-radius: 10px;
+      overflow: hidden;
+      display: flex;
+      flex-direction: column;
+    }
+    .thumb {
+      width: 100%;
+      aspect-ratio: 16 / 10;
+      object-fit: cover;
+      background: #020617;
+      display: block;
+    }
+    .thumb-placeholder {
+      width: 100%;
+      aspect-ratio: 16 / 10;
+      display: grid;
+      place-items: center;
+      background: #020617;
+      color: #6b7280;
+      font-size: 0.85rem;
+      letter-spacing: 0.08em;
+      font-weight: 700;
+    }
+    .info {
+      padding: 8px;
+      font-size: 0.8rem;
+      color: var(--muted);
+      word-break: break-all;
+    }
+    .info a {
+      color: #7dd3fc;
+      text-decoration: none;
+    }
+    .info a:hover { text-decoration: underline; }
+    .subinfo {
+      margin-top: 6px;
+      color: var(--muted);
+      font-size: 0.75rem;
+      line-height: 1.4;
+      word-break: break-word;
+    }
+    .badge-row {
+      display: flex;
+      gap: 6px;
+      flex-wrap: wrap;
+      margin-top: 8px;
+    }
+    .badge {
+      display: inline-flex;
+      align-items: center;
+      padding: 3px 8px;
+      border-radius: 999px;
+      font-size: 0.72rem;
+      font-weight: 700;
+      line-height: 1;
+    }
+    .badge-same {
+      background: rgba(34, 197, 94, 0.18);
+      color: #86efac;
+      border: 1px solid rgba(34, 197, 94, 0.35);
+    }
+    .badge-external {
+      background: rgba(56, 189, 248, 0.14);
+      color: #7dd3fc;
+      border: 1px solid rgba(56, 189, 248, 0.35);
+    }
+    .badge-muted {
+      background: rgba(156, 163, 175, 0.12);
+      color: #d1d5db;
+      border: 1px solid rgba(156, 163, 175, 0.25);
+    }
+    .empty-filter {
+      grid-column: 1 / -1;
+      padding: 24px;
+      border-radius: 10px;
+      border: 1px dashed #334155;
+      color: var(--muted);
+      text-align: center;
+      line-height: 1.6;
+    }
+    details {
+      margin-top: 12px;
+      color: var(--muted);
+    }
+    details summary {
+      cursor: pointer;
+    }
+    .page-list {
+      margin: 8px 0 0;
+      padding-left: 18px;
+      line-height: 1.6;
+      word-break: break-all;
+    }
+    .page-list a {
+      color: #7dd3fc;
+    }
+  </style>
+</head>
+<body>
+  <div class="wrap">
+    <h1>サイト内画像一覧</h1>
+    <p>サイトのURLを入力すると、HTMLに含まれている画像を抽出して一覧化します。WordPressに限らず、任意のサイトに対応しています。サイト内のリンクとサイトマップをたどり、複数ページから集めることもできます。JavaScriptの実行後に挿入される画像は、HTML上にURLが無い場合は一覧に含まれません。</p>
+
+    <div class="panel">
+      <div class="row">
+        <input id="siteUrl" type="url" placeholder="https://example.com または https://example.com/page" />
+        <select id="scope" aria-label="取得範囲">
+          <option value="site">取得範囲: サイト内を巡回</option>
+          <option value="page">取得範囲: このページのみ</option>
+        </select>
+        <select id="maxPages" aria-label="最大ページ数">
+          <option value="5">最大 5 ページ</option>
+          <option value="10" selected>最大 10 ページ</option>
+          <option value="20">最大 20 ページ</option>
+          <option value="30">最大 30 ページ</option>
+          <option value="50">最大 50 ページ</option>
+        </select>
+        <button id="loadBtn">取得する</button>
+        <button id="stopBtn" class="secondary" disabled>中止</button>
+        <label class="inline-check"><input id="useCache" type="checkbox" checked> キャッシュを使う</label>
+      </div>
+      <div id="status" class="status"></div>
+    </div>
+
+    <div class="panel">
+      <div class="meta">
+        <div>表示件数: <span id="count">0</span> / 全 <span id="totalCount">0</span> 件</div>
+        <div id="targetHost">対象: -</div>
+      </div>
+      <div class="filter" id="imageFilter">
+        <input id="keywordFilter" type="search" placeholder="URL・ファイル名・代替テキストで絞り込み" aria-label="キーワード絞り込み" />
+        <label><input type="radio" name="hostFilter" value="all" checked> すべて</label>
+        <label><input type="radio" name="hostFilter" value="same"> サイト内のみ</label>
+        <label><input type="radio" name="hostFilter" value="external"> 外部のみ</label>
+        <label><input id="includeIcons" type="checkbox"> アイコンを含める</label>
+        <label><input id="collapseVariants" type="checkbox" checked> 派生サイズをまとめる</label>
+        <button id="copyBtn" class="secondary" type="button">表示中のURLをコピー</button>
+      </div>
+      <div id="grid" class="grid"></div>
+      <details>
+        <summary>走査したページ (<span id="pageCount">0</span>)</summary>
+        <ul id="pageList" class="page-list"></ul>
+      </details>
+    </div>
+  </div>
+
+  <script>
+    const IMAGE_EXT_RE = /\.(?:avif|bmp|gif|ico|jpe?g|jfif|png|svg|webp)(?:$|[?#])/i;
+    const SKIP_PAGE_EXT_RE = /\.(?:avif|bmp|css|gif|ico|jpe?g|js|json|mjs|mp3|mp4|pdf|png|svg|webm|webp|woff2?|zip|gz)(?:$|[?#])/i;
+    const SIZE_SUFFIX_RE = /-(?:scaled|\d+x\d+)(?=\.[a-z0-9]+$)/i;
+    const PROXY_STRATEGIES = [
+      {
+        label: "direct",
+        buildUrl(targetUrl) { return targetUrl; },
+        unwrap(text) { return text; }
+      },
+      {
+        label: "codetabs",
+        buildUrl(targetUrl) {
+          return `https://api.codetabs.com/v1/proxy/?quest=${encodeURIComponent(targetUrl)}`;
+        },
+        unwrap(text) { return text; }
+      },
+      {
+        label: "allorigins",
+        buildUrl(targetUrl) {
+          return `https://api.allorigins.win/raw?url=${encodeURIComponent(targetUrl)}`;
+        },
+        unwrap(text) { return text; }
+      },
+      {
+        label: "cors.eu.org",
+        buildUrl(targetUrl) { return `https://cors.eu.org/${targetUrl}`; },
+        unwrap(text) { return text; }
+      }
+    ];
+
+    const siteUrlInput = document.getElementById("siteUrl");
+    const scopeInput = document.getElementById("scope");
+    const maxPagesInput = document.getElementById("maxPages");
+    const loadBtn = document.getElementById("loadBtn");
+    const stopBtn = document.getElementById("stopBtn");
+    const copyBtn = document.getElementById("copyBtn");
+    const statusEl = document.getElementById("status");
+    const gridEl = document.getElementById("grid");
+    const countEl = document.getElementById("count");
+    const totalCountEl = document.getElementById("totalCount");
+    const targetHostEl = document.getElementById("targetHost");
+    const imageFilterEl = document.getElementById("imageFilter");
+    const keywordFilterInput = document.getElementById("keywordFilter");
+    const useCacheInput = document.getElementById("useCache");
+    const includeIconsInput = document.getElementById("includeIcons");
+    const collapseVariantsInput = document.getElementById("collapseVariants");
+    const pageCountEl = document.getElementById("pageCount");
+    const pageListEl = document.getElementById("pageList");
+
+    const CACHE_PREFIX = "site-images-cache-v1:";
+    let currentImages = [];
+    let scannedPages = [];
+    let siteHost = "";
+    let keywordFilterTimer = null;
+    let activeController = null;
+    let preferredStrategy = null;
+
+    function setStatus(text, isError = false) {
+      statusEl.textContent = text;
+      statusEl.classList.toggle("error", isError);
+    }
+
+    function normalizeInputUrl(input) {
+      const raw = input.trim();
+      if (!raw) throw new Error("URLを入力してください。");
+      const withProtocol = /^https?:\/\//i.test(raw) ? raw : `https://${raw}`;
+      const url = new URL(withProtocol);
+      if (!/^https?:$/i.test(url.protocol)) {
+        throw new Error("http または https のURLを入力してください。");
+      }
+      url.hash = "";
+      return url.toString();
+    }
+
+    function resolveUrl(raw, baseUrl) {
+      const value = String(raw || "").trim().replace(/&amp;/g, "&");
+      if (!value || /^(?:data|blob|javascript|mailto|tel):/i.test(value)) return null;
+      if (value.startsWith("#")) return null;
+      try {
+        const url = new URL(value, baseUrl);
+        if (!/^https?:$/i.test(url.protocol)) return null;
+        url.hash = "";
+        return url.toString();
+      } catch (_) {
+        return null;
+      }
+    }
+
+    function normalizePageUrl(raw, baseUrl) {
+      const absolute = resolveUrl(raw, baseUrl);
+      if (!absolute) return null;
+      const url = new URL(absolute);
+      if (url.pathname !== "/" && url.pathname.endsWith("/")) {
+        url.pathname = url.pathname.replace(/\/+$/, "");
+      }
+      return url.toString();
+    }
+
+    function hostsRelated(imageHost, pageHost) {
+      const a = imageHost.replace(/^www\./i, "").toLowerCase();
+      const b = pageHost.replace(/^www\./i, "").toLowerCase();
+      return a === b || a.endsWith(`.${b}`) || b.endsWith(`.${a}`);
+    }
+
+    function filenameOf(url) {
+      try {
+        return decodeURIComponent(new URL(url).pathname.split("/").pop() || url);
+      } catch (_) {
+        return url;
+      }
+    }
+
+    function isTrackingPixel(url, width, height) {
+      if (width === 1 && height === 1) return true;
+      return /(?:pixel|spacer|blank|tracking|beacon|1x1)\.(?:gif|png|jpe?g)(?:$|[?#])/i.test(url);
+    }
+
+    function parseSrcset(value) {
+      if (!value) return [];
+      return value.split(",").map((part) => {
+        const tokens = part.trim().split(/\s+/).filter(Boolean);
+        if (!tokens.length) return null;
+        const widthToken = tokens.find((token) => /^\d+w$/i.test(token));
+        return {
+          url: tokens[0],
+          width: widthToken ? Number.parseInt(widthToken, 10) : 0
+        };
+      }).filter(Boolean);
+    }
+
+    function extractCssUrls(cssText) {
+      const urls = [];
+      const re = /url\(\s*(['"]?)([^"')]+)\1\s*\)/gi;
+      let match = re.exec(cssText);
+      while (match) {
+        const raw = match[2].trim();
+        if (IMAGE_EXT_RE.test(raw)) urls.push(raw);
+        match = re.exec(cssText);
+      }
+      return urls;
+    }
+
+    function collectImageValue(value, out) {
+      if (!value) return;
+      if (typeof value === "string") {
+        out.push(value);
+        return;
+      }
+      if (Array.isArray(value)) {
+        value.forEach((entry) => collectImageValue(entry, out));
+        return;
+      }
+      if (typeof value === "object") {
+        collectImageValue(value.url, out);
+        collectImageValue(value.contentUrl, out);
+      }
+    }
+
+    function collectJsonLdImages(value, out, depth = 0) {
+      if (!value || depth > 8) return;
+      if (Array.isArray(value)) {
+        value.forEach((entry) => collectJsonLdImages(entry, out, depth + 1));
+        return;
+      }
+      if (typeof value !== "object") return;
+      collectImageValue(value.image, out);
+      collectImageValue(value.thumbnailUrl, out);
+      Object.values(value).forEach((entry) => {
+        if (entry && typeof entry === "object") collectJsonLdImages(entry, out, depth + 1);
+      });
+    }
+
+    function extractFromHtml(html, pageUrl, origin) {
+      const doc = new DOMParser().parseFromString(html, "text/html");
+      const baseHref = doc.querySelector("base[href]")?.getAttribute("href");
+      const baseUrl = (baseHref && resolveUrl(baseHref, pageUrl)) || pageUrl;
+      const images = [];
+      const links = [];
+
+      function addImage(raw, meta) {
+        const absolute = resolveUrl(raw, baseUrl);
+        if (!absolute) return;
+        if (meta.source === "css" && !IMAGE_EXT_RE.test(absolute)) return;
+        if (isTrackingPixel(absolute, meta.width, meta.height)) return;
+        images.push({
+          url: absolute,
+          pageUrl,
+          alt: meta.alt || "",
+          source: meta.source,
+          width: Number(meta.width) || 0
+        });
+      }
+
+      function addSrcset(value, meta) {
+        parseSrcset(value).forEach((candidate) => {
+          addImage(candidate.url, { ...meta, width: candidate.width || meta.width || 0 });
+        });
+      }
+
+      doc.querySelectorAll("img").forEach((img) => {
+        const meta = {
+          alt: img.getAttribute("alt") || "",
+          width: Number(img.getAttribute("width")) || 0,
+          height: Number(img.getAttribute("height")) || 0,
+          source: "img"
+        };
+        ["src", "data-src", "data-lazy-src", "data-original", "data-lazy", "data-url", "data-bg"].forEach((attr) => {
+          addImage(img.getAttribute(attr), meta);
+        });
+        addSrcset(img.getAttribute("srcset"), meta);
+        addSrcset(img.getAttribute("data-srcset"), meta);
+      });
+
+      doc.querySelectorAll("source").forEach((source) => {
+        addSrcset(source.getAttribute("srcset"), { source: "img" });
+        addImage(source.getAttribute("src"), { source: "img" });
+      });
+
+      doc.querySelectorAll("video[poster], image").forEach((node) => {
+        addImage(node.getAttribute("poster") || node.getAttribute("href") || node.getAttribute("xlink:href"), {
+          source: "img"
+        });
+      });
+
+      [
+        'meta[property="og:image"]',
+        'meta[property="og:image:url"]',
+        'meta[property="og:image:secure_url"]',
+        'meta[name="twitter:image"]',
+        'meta[name="twitter:image:src"]',
+        'meta[itemprop="image"]'
+      ].forEach((selector) => {
+        doc.querySelectorAll(selector).forEach((meta) => {
+          addImage(meta.getAttribute("content"), { source: "meta" });
+        });
+      });
+
+      doc.querySelectorAll("link[rel]").forEach((link) => {
+        const rel = (link.getAttribute("rel") || "").toLowerCase();
+        if (!rel.includes("icon")) return;
+        addImage(link.getAttribute("href"), { source: "icon" });
+      });
+
+      doc.querySelectorAll("[style*='url']").forEach((node) => {
+        extractCssUrls(node.getAttribute("style") || "").forEach((url) => {
+          addImage(url, { source: "css" });
+        });
+      });
+
+      doc.querySelectorAll("style").forEach((style) => {
+        extractCssUrls(style.textContent || "").forEach((url) => {
+          addImage(url, { source: "css" });
+        });
+      });
+
+      doc.querySelectorAll('script[type="application/ld+json"]').forEach((script) => {
+        try {
+          const urls = [];
+          collectJsonLdImages(JSON.parse(script.textContent || ""), urls);
+          urls.forEach((url) => addImage(url, { source: "jsonld" }));
+        } catch (_) {
+          // JSON-LD が壊れていても他の画像抽出は続行します。
+        }
+      });
+
+      doc.querySelectorAll("noscript").forEach((node) => {
+        const nested = extractFromHtml(node.textContent || "", pageUrl, origin);
+        images.push(...nested.images);
+        links.push(...nested.links);
+      });
+
+      doc.querySelectorAll("a[href]").forEach((anchor) => {
+        const absolute = normalizePageUrl(anchor.getAttribute("href"), baseUrl);
+        if (!absolute) return;
+        const url = new URL(absolute);
+        if (url.origin !== origin) return;
+        if (SKIP_PAGE_EXT_RE.test(url.pathname)) return;
+        if (/\/wp-admin(?:\/|$)|\/wp-login\.php$|\/feed\/?$/i.test(url.pathname)) return;
+        links.push(absolute);
+      });
+
+      return { images, links };
+    }
+
+    function isBadProxyPayload(text) {
+      const trimmed = String(text || "").trim();
+      if (!trimmed) return true;
+      if (trimmed.startsWith("{") && /"Error"|corsfix_error|corsproxy|Bad request/i.test(trimmed)) return true;
+      if (/^Oops\.\.\. Request Timeout\.$/i.test(trimmed)) return true;
+      return false;
+    }
+
+    function mergeSignals(parent, timeoutMs) {
+      const timeout = AbortSignal.timeout(timeoutMs);
+      if (!parent) return timeout;
+      if (typeof AbortSignal.any === "function") return AbortSignal.any([parent, timeout]);
+      return parent;
+    }
+
+    async function fetchText(targetUrl, signal) {
+      const ordered = preferredStrategy
+        ? [preferredStrategy, ...PROXY_STRATEGIES.filter((item) => item !== preferredStrategy)]
+        : PROXY_STRATEGIES;
+      const errors = [];
+
+      for (const strategy of ordered) {
+        try {
+          const response = await fetch(strategy.buildUrl(targetUrl), {
+            headers: { Accept: "text/html, application/xml, text/plain;q=0.9, */*;q=0.8" },
+            signal: mergeSignals(signal, 20000)
+          });
+          if (!response.ok) {
+            const httpError = new Error(`${response.status} ${response.statusText}`);
+            httpError.fromOrigin = strategy.label === "direct";
+            throw httpError;
+          }
+          const text = strategy.unwrap(await response.text());
+          if (isBadProxyPayload(text)) throw new Error("無効な応答です。");
+          preferredStrategy = strategy;
+          return text;
+        } catch (error) {
+          if (signal?.aborted || error?.name === "AbortError") throw error;
+          if (error?.fromOrigin) throw error;
+          const message = error instanceof Error ? error.message : String(error);
+          errors.push(`${strategy.label}: ${message}`);
+        }
+      }
+
+      throw new Error(errors.join(" / "));
+    }
+
+    function parseSitemapLocs(xmlText) {
+      const doc = new DOMParser().parseFromString(xmlText, "text/xml");
+      if (doc.querySelector("parsererror")) return [];
+      return [...doc.querySelectorAll("loc")]
+        .map((node) => node.textContent?.trim() || "")
+        .filter(Boolean);
+    }
+
+    async function discoverSitemapPages(origin, signal, limit) {
+      const seeds = [`${origin}/sitemap.xml`, `${origin}/sitemap_index.xml`];
+      const pageUrls = [];
+      const seen = new Set();
+
+      for (const seed of seeds) {
+        if (signal?.aborted || pageUrls.length >= limit) break;
+        let locs = [];
+        try {
+          locs = parseSitemapLocs(await fetchText(seed, signal));
+        } catch (_) {
+          continue;
+        }
+
+        const childSitemaps = locs.filter((loc) => /\.xml(?:$|\?)/i.test(loc)).slice(0, 3);
+        const directPages = locs.filter((loc) => !/\.xml(?:$|\?)/i.test(loc));
+        directPages.forEach((loc) => {
+          if (pageUrls.length >= limit || seen.has(loc)) return;
+          seen.add(loc);
+          pageUrls.push(loc);
+        });
+
+        for (const child of childSitemaps) {
+          if (signal?.aborted || pageUrls.length >= limit) break;
+          try {
+            const childLocs = parseSitemapLocs(await fetchText(child, signal));
+            childLocs.forEach((loc) => {
+              if (/\.xml(?:$|\?)/i.test(loc) || pageUrls.length >= limit || seen.has(loc)) return;
+              seen.add(loc);
+              pageUrls.push(loc);
+            });
+          } catch (_) {
+            // 子サイトマップが取得できなくても巡回は続行します。
+          }
+        }
+      }
+
+      return pageUrls;
+    }
+
+    function variantGroupKey(rawUrl) {
+      const url = new URL(rawUrl);
+      const path = url.pathname.replace(SIZE_SUFFIX_RE, "");
+      return `${url.origin}${path}`.toLowerCase();
+    }
+
+    function variantScore(item) {
+      const url = new URL(item.url);
+      const name = url.pathname.split("/").pop() || "";
+      let score = item.width || 0;
+      if (!SIZE_SUFFIX_RE.test(url.pathname)) score += 1000000;
+      const hasSizeQuery = [...url.searchParams.keys()].some((key) => /^(w|width|h|height)$/i.test(key));
+      if (!hasSizeQuery) score += 100000;
+      const sized = name.match(/-(\d+)x(\d+)\.[a-z0-9]+$/i);
+      if (sized) score += Number(sized[1]) * Number(sized[2]);
+      return score;
+    }
+
+    function collapseVariants(items) {
+      const groups = new Map();
+      items.forEach((item) => {
+        const key = variantGroupKey(item.url);
+        const list = groups.get(key) || [];
+        list.push(item);
+        groups.set(key, list);
+      });
+
+      return [...groups.values()].map((list) => {
+        const best = [...list].sort((a, b) => variantScore(b) - variantScore(a))[0];
+        const pages = [...new Set(list.flatMap((item) => item.pages))];
+        return { ...best, pages, variantCount: list.length };
+      });
+    }
+
+    function getSelectedHostFilter() {
+      return document.querySelector('input[name="hostFilter"]:checked')?.value || "all";
+    }
+
+    function applyFilters(items) {
+      const hostFilter = getSelectedHostFilter();
+      const includeIcons = includeIconsInput.checked;
+      const keyword = keywordFilterInput.value.trim().toLowerCase();
+      const terms = keyword ? keyword.split(/\s+/).filter(Boolean) : [];
+
+      const filtered = items.filter((item) => {
+        if (!includeIcons && item.source === "icon") return false;
+        const sameHost = hostsRelated(new URL(item.url).hostname, siteHost);
+        if (hostFilter === "same" && !sameHost) return false;
+        if (hostFilter === "external" && sameHost) return false;
+        if (!terms.length) return true;
+        const haystack = [item.url, filenameOf(item.url), item.alt, ...item.pages].join(" ").toLowerCase();
+        return terms.every((term) => haystack.includes(term));
+      });
+
+      return collapseVariantsInput.checked ? collapseVariants(filtered) : filtered.map((item) => ({
+        ...item,
+        variantCount: 1
+      }));
+    }
+
+    function updateCounts(visible, total) {
+      countEl.textContent = String(visible);
+      totalCountEl.textContent = String(total);
+    }
+
+    function renderPages() {
+      pageCountEl.textContent = String(scannedPages.length);
+      pageListEl.innerHTML = "";
+      scannedPages.forEach((page) => {
+        const li = document.createElement("li");
+        const link = document.createElement("a");
+        link.href = page.url;
+        link.target = "_blank";
+        link.rel = "noopener noreferrer";
+        link.textContent = page.url;
+        li.appendChild(link);
+        if (page.error) {
+          li.append(` （取得失敗: ${page.error}）`);
+        } else {
+          li.append(` （画像 ${page.imageCount} 件）`);
+        }
+        pageListEl.appendChild(li);
+      });
+    }
+
+    function createCard(item) {
+      const card = document.createElement("div");
+      card.className = "card";
+
+      const img = document.createElement("img");
+      img.className = "thumb";
+      img.loading = "lazy";
+      img.referrerPolicy = "no-referrer";
+      img.alt = item.alt || filenameOf(item.url);
+      img.src = item.url;
+      const sizeEl = document.createElement("div");
+      sizeEl.className = "subinfo";
+      img.addEventListener("load", () => {
+        if (img.naturalWidth) sizeEl.textContent = `${img.naturalWidth} × ${img.naturalHeight}`;
+      });
+      img.addEventListener("error", () => {
+        const placeholder = document.createElement("div");
+        placeholder.className = "thumb-placeholder";
+        placeholder.textContent = "NO IMAGE";
+        img.replaceWith(placeholder);
+      });
+      card.appendChild(img);
+
+      const info = document.createElement("div");
+      info.className = "info";
+      const link = document.createElement("a");
+      link.href = item.url;
+      link.target = "_blank";
+      link.rel = "noopener noreferrer";
+      link.textContent = filenameOf(item.url);
+      info.appendChild(link);
+
+      const badgeRow = document.createElement("div");
+      badgeRow.className = "badge-row";
+      const hostBadge = document.createElement("span");
+      const sameHost = hostsRelated(new URL(item.url).hostname, siteHost);
+      hostBadge.className = `badge ${sameHost ? "badge-same" : "badge-external"}`;
+      hostBadge.textContent = sameHost ? "サイト内" : "外部";
+      badgeRow.appendChild(hostBadge);
+
+      if (item.variantCount > 1) {
+        const variantBadge = document.createElement("span");
+        variantBadge.className = "badge badge-muted";
+        variantBadge.textContent = `派生 ${item.variantCount}`;
+        badgeRow.appendChild(variantBadge);
+      }
+      info.appendChild(badgeRow);
+
+      if (item.alt) {
+        const altEl = document.createElement("div");
+        altEl.className = "subinfo";
+        altEl.textContent = item.alt;
+        info.appendChild(altEl);
+      }
+      info.appendChild(sizeEl);
+
+      const pageEl = document.createElement("div");
+      pageEl.className = "subinfo";
+      const pageLink = document.createElement("a");
+      pageLink.href = item.pages[0];
+      pageLink.target = "_blank";
+      pageLink.rel = "noopener noreferrer";
+      pageLink.textContent = item.pages.length > 1
+        ? `${item.pages.length} ページで使用`
+        : "使用ページを開く";
+      pageEl.appendChild(pageLink);
+      info.appendChild(pageEl);
+
+      card.appendChild(info);
+      return card;
+    }
+
+    function renderImages() {
+      const visible = applyFilters(currentImages);
+      gridEl.innerHTML = "";
+      if (visible.length === 0) {
+        const empty = document.createElement("div");
+        empty.className = "empty-filter";
+        empty.textContent = currentImages.length
+          ? "条件に一致する画像がありません。フィルタ条件を変更してください。"
+          : "表示できる画像がありません。";
+        gridEl.appendChild(empty);
+      } else {
+        const fragment = document.createDocumentFragment();
+        visible.forEach((item) => fragment.appendChild(createCard(item)));
+        gridEl.appendChild(fragment);
+      }
+      updateCounts(visible.length, currentImages.length);
+      return visible;
+    }
+
+    function mergeImages(found) {
+      const index = new Map(currentImages.map((item) => [item.url, item]));
+      found.forEach((entry) => {
+        let item = index.get(entry.url);
+        if (!item) {
+          item = {
+            url: entry.url,
+            alt: entry.alt || "",
+            source: entry.source,
+            width: entry.width || 0,
+            pages: []
+          };
+          index.set(entry.url, item);
+          currentImages.push(item);
+        }
+        if (entry.alt && !item.alt) item.alt = entry.alt;
+        if (entry.width > item.width) item.width = entry.width;
+        if (item.source === "icon" && entry.source !== "icon") item.source = entry.source;
+        if (!item.pages.includes(entry.pageUrl)) item.pages.push(entry.pageUrl);
+      });
+    }
+
+    function cacheKey(pageUrl, maxPages) {
+      return `${CACHE_PREFIX}${pageUrl}:pages=${maxPages}`;
+    }
+
+    function loadCache(pageUrl, maxPages) {
+      try {
+        const raw = localStorage.getItem(cacheKey(pageUrl, maxPages));
+        if (!raw) return null;
+        const parsed = JSON.parse(raw);
+        if (!parsed || !Array.isArray(parsed.images)) return null;
+        return parsed;
+      } catch (_) {
+        return null;
+      }
+    }
+
+    function saveCache(pageUrl, maxPages) {
+      try {
+        localStorage.setItem(cacheKey(pageUrl, maxPages), JSON.stringify({
+          cachedAt: new Date().toISOString(),
+          images: currentImages,
+          pages: scannedPages,
+          siteHost
+        }));
+      } catch (_) {
+        // 容量超過やプライベートモードでは保存を省略します。
+      }
+    }
+
+    function sleep(ms, signal) {
+      return new Promise((resolve, reject) => {
+        const timer = setTimeout(resolve, ms);
+        signal?.addEventListener("abort", () => {
+          clearTimeout(timer);
+          reject(new DOMException("中止しました。", "AbortError"));
+        }, { once: true });
+      });
+    }
+
+    async function crawlSite(startUrl, maxPages, signal, onProgress) {
+      const origin = new URL(startUrl).origin;
+      const queue = [];
+      const queued = new Set();
+      const visited = new Set();
+      let sitemapDone = maxPages <= 1;
+      let failedPages = 0;
+      let activeWorkers = 0;
+
+      function enqueue(raw) {
+        const normalized = normalizePageUrl(raw, startUrl);
+        if (!normalized || queued.has(normalized) || visited.has(normalized)) return;
+        const url = new URL(normalized);
+        if (url.origin !== origin) return;
+        if (SKIP_PAGE_EXT_RE.test(url.pathname)) return;
+        if (queued.size >= maxPages * 8) return;
+        queued.add(normalized);
+        queue.push(normalized);
+      }
+
+      enqueue(startUrl);
+      if (maxPages > 1) {
+        discoverSitemapPages(origin, signal, maxPages * 4)
+          .then((urls) => urls.forEach(enqueue))
+          .catch(() => {})
+          .finally(() => {
+            sitemapDone = true;
+          });
+      }
+
+      async function processNext() {
+        while (!signal.aborted && visited.size < maxPages) {
+          const pageUrl = queue.shift();
+          if (!pageUrl) {
+            if (sitemapDone && activeWorkers === 0) return;
+            await sleep(200, signal);
+            continue;
+          }
+          if (visited.has(pageUrl) || visited.size >= maxPages) continue;
+          visited.add(pageUrl);
+          activeWorkers += 1;
+
+          try {
+            const html = await fetchText(pageUrl, signal);
+            const extracted = extractFromHtml(html, pageUrl, origin);
+            mergeImages(extracted.images);
+            if (maxPages > 1 && visited.size < maxPages) extracted.links.forEach(enqueue);
+            scannedPages.push({
+              url: pageUrl,
+              imageCount: new Set(extracted.images.map((item) => item.url)).size,
+              error: ""
+            });
+          } catch (error) {
+            if (signal.aborted || error?.name === "AbortError") throw error;
+            failedPages += 1;
+            const message = error instanceof Error ? error.message : String(error);
+            scannedPages.push({ url: pageUrl, imageCount: 0, error: message });
+          } finally {
+            activeWorkers -= 1;
+          }
+
+          onProgress({
+            visited: visited.size,
+            maxPages,
+            images: currentImages.length,
+            failedPages
+          });
+        }
+      }
+
+      const workers = Array.from({ length: Math.min(3, maxPages) }, () => processNext());
+      await Promise.all(workers);
+      return { failedPages, visited: visited.size };
+    }
+
+    function syncScopeControls() {
+      const singlePage = scopeInput.value === "page";
+      maxPagesInput.disabled = singlePage;
+    }
+
+    async function loadImages() {
+      activeController?.abort();
+      const controller = new AbortController();
+      activeController = controller;
+      loadBtn.disabled = true;
+      stopBtn.disabled = false;
+      currentImages = [];
+      scannedPages = [];
+      preferredStrategy = null;
+      gridEl.innerHTML = "";
+      keywordFilterInput.value = "";
+      updateCounts(0, 0);
+      renderPages();
+
+      try {
+        const startUrl = normalizeInputUrl(siteUrlInput.value);
+        const maxPages = scopeInput.value === "page" ? 1 : Number(maxPagesInput.value);
+        siteHost = new URL(startUrl).hostname;
+        targetHostEl.textContent = `対象: ${new URL(startUrl).origin}`;
+        setStatus("取得を開始しました。");
+
+        const cached = useCacheInput.checked ? loadCache(startUrl, maxPages) : null;
+        if (cached) {
+          currentImages = cached.images;
+          scannedPages = cached.pages || [];
+          siteHost = cached.siteHost || siteHost;
+          renderImages();
+          renderPages();
+          const savedAt = cached.cachedAt ? new Date(cached.cachedAt).toLocaleString() : "";
+          setStatus(`キャッシュから ${currentImages.length} 件を表示しました。保存時刻 ${savedAt}`);
+          return;
+        }
+
+        const result = await crawlSite(startUrl, maxPages, controller.signal, (progress) => {
+          renderImages();
+          renderPages();
+          const failLabel = progress.failedPages ? `、失敗 ${progress.failedPages} ページ` : "";
+          setStatus(`取得中です。${progress.visited}/${progress.maxPages} ページ、画像 ${progress.images} 件${failLabel}`);
+        });
+
+        const visible = renderImages();
+        renderPages();
+        if (currentImages.length === 0 && result.failedPages > 0) {
+          const firstError = scannedPages.find((page) => page.error)?.error || "取得に失敗しました。";
+          setStatus(`ページを取得できませんでした。${firstError}`, true);
+          return;
+        }
+        saveCache(startUrl, maxPages);
+        const failLabel = result.failedPages ? `、取得失敗 ${result.failedPages} ページ` : "";
+        setStatus(`完了しました。${result.visited} ページを走査し、${visible.length} 件を表示しています（全 ${currentImages.length} 件）${failLabel}。`);
+      } catch (error) {
+        if (error?.name === "AbortError") {
+          renderImages();
+          renderPages();
+          setStatus(`中止しました。ここまでで ${currentImages.length} 件を表示しています。`);
+          return;
+        }
+        const message = error instanceof Error ? error.message : String(error);
+        setStatus(`エラー: ${message}`, true);
+      } finally {
+        if (activeController === controller) {
+          loadBtn.disabled = false;
+          stopBtn.disabled = true;
+          activeController = null;
+        }
+      }
+    }
+
+    function handleFilterChange() {
+      const visible = renderImages();
+      if (!currentImages.length) return;
+      setStatus(`絞り込み結果は ${visible.length} 件です（全 ${currentImages.length} 件）。`);
+    }
+
+    async function copyVisibleUrls() {
+      const urls = applyFilters(currentImages).map((item) => item.url);
+      if (!urls.length) {
+        setStatus("コピーできるURLがありません。", true);
+        return;
+      }
+      try {
+        await navigator.clipboard.writeText(urls.join("\n"));
+        setStatus(`${urls.length} 件のURLをコピーしました。`);
+      } catch (_) {
+        setStatus("クリップボードへのコピーに失敗しました。", true);
+      }
+    }
+
+    loadBtn.addEventListener("click", loadImages);
+    stopBtn.addEventListener("click", () => activeController?.abort());
+    copyBtn.addEventListener("click", copyVisibleUrls);
+    scopeInput.addEventListener("change", syncScopeControls);
+    imageFilterEl.addEventListener("change", handleFilterChange);
+    keywordFilterInput.addEventListener("input", () => {
+      clearTimeout(keywordFilterTimer);
+      keywordFilterTimer = setTimeout(handleFilterChange, 200);
+    });
+    siteUrlInput.addEventListener("keydown", (event) => {
+      if (event.key === "Enter") loadImages();
+    });
+    syncScopeControls();
+  </script>
+</body>
+</html>

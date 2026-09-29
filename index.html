@@ -200,11 +200,11 @@
 <body>
   <div class="wrap">
     <h1>WordPress uploads メディア一覧</h1>
-    <p>WordPressサイトURLを入力すると、`wp/v2/media` から `uploads` 配下の画像/動画を一覧化します。`/wp/` などサブディレクトリ設置のサイトにも対応しています。</p>
+    <p>WordPressサイトURLを入力すると、`wp/v2/media` から `uploads` 配下の画像/動画を一覧化します。`http://` のサイトと、`/wp/` などサブディレクトリ設置のサイトにも対応しています。</p>
 
     <div class="panel">
       <div class="row">
-        <input id="siteUrl" type="url" placeholder="https://example.com または https://example.com/wp" />
+        <input id="siteUrl" type="url" placeholder="https://example.com または http://example.com/wp" />
         <select id="maxPages" aria-label="ページ数">
           <option value="">ページ数: すべて</option>
         </select>
@@ -258,6 +258,7 @@
     let currentMedia = [];
     let renderedKeys = new Set();
     let keywordFilterTimer = null;
+    let requestPlan = null;
 
     function setStatus(text, isError = false) {
       statusEl.textContent = text;
@@ -466,7 +467,7 @@
           const img = document.createElement("img");
           img.className = "thumb";
           img.loading = "lazy";
-          img.src = candidateThumbs[0];
+          img.src = mediaDisplayUrl(candidateThumbs[0]);
           img.alt = item.alt_text || item.title?.rendered || "video thumbnail";
           img.onerror = () => {
             const placeholder = document.createElement("div");
@@ -485,7 +486,7 @@
         const img = document.createElement("img");
         img.className = "thumb";
         img.loading = "lazy";
-        img.src = item.source_url;
+        img.src = mediaDisplayUrl(item.source_url);
         img.alt = item.alt_text || item.title?.rendered || "image";
         card.appendChild(img);
       }
@@ -682,7 +683,49 @@
       return filteredMedia.length;
     }
 
-    async function fetchMediaPage(apiUrl, page, dateQuery) {
+    function canUseSameOriginProxy() {
+      return location.protocol === "http:" || location.protocol === "https:";
+    }
+
+    function isBlockedHttpUrl(targetUrl) {
+      if (!window.isSecureContext) return false;
+      try {
+        const url = new URL(targetUrl);
+        if (url.protocol !== "http:") return false;
+        const host = url.hostname.toLowerCase();
+        return host !== "localhost" && host !== "127.0.0.1" && host !== "::1";
+      } catch (_) {
+        return false;
+      }
+    }
+
+    function mediaDisplayUrl(url) {
+      if (!url || !isBlockedHttpUrl(url) || !canUseSameOriginProxy()) return url;
+      return buildProxyUrl(url);
+    }
+
+    function buildProxyUrl(targetUrl) {
+      const proxy = new URL("/wp-proxy", window.location.origin);
+      proxy.searchParams.set("url", targetUrl);
+      return proxy.toString();
+    }
+
+    function swapScheme(baseUrl) {
+      const url = new URL(baseUrl);
+      url.protocol = url.protocol === "https:" ? "http:" : "https:";
+      const path = url.pathname.replace(/\/+$/, "");
+      return path ? `${url.origin}${path}` : url.origin;
+    }
+
+    function isTransportError(error) {
+      return error?.name === "TypeError" || error?.proxyMissing === true;
+    }
+
+    function isNotWordPressError(error) {
+      return typeof error?.message === "string" && error.message.includes("WordPressサイトではない可能性");
+    }
+
+    async function fetchMediaPageWithPlan(plan, page, dateQuery) {
       const params = new URLSearchParams({
         per_page: "100",
         page: String(page)
@@ -690,17 +733,48 @@
       if (dateQuery?.after) params.set("after", dateQuery.after);
       if (dateQuery?.before) params.set("before", dateQuery.before);
 
-      const res = await fetch(`${apiUrl}?${params.toString()}`, {
-        headers: { Accept: "application/json" }
-      });
+      const targetUrl = `${plan.apiUrl}?${params.toString()}`;
+      const requestUrl = plan.viaProxy ? buildProxyUrl(targetUrl) : targetUrl;
+      let res;
+      try {
+        res = await fetch(requestUrl, {
+          headers: { Accept: "application/json" }
+        });
+      } catch (error) {
+        if (error?.name === "TypeError") {
+          throw new TypeError(
+            plan.viaProxy
+              ? "中継サーバーへの接続に失敗しました。"
+              : "サイトへ接続できませんでした。CORS制限、またはブラウザがHTTP通信をブロックした可能性があります。"
+          );
+        }
+        throw error;
+      }
+
+      const contentType = String(res.headers.get("content-type") || "").toLowerCase();
+      if (plan.viaProxy && res.status === 404 && !contentType.includes("json")) {
+        const missing = new TypeError("HTTPサイトを中継する /wp-proxy が見つかりません。server.py で配信してください。");
+        missing.proxyMissing = true;
+        throw missing;
+      }
+
       if (!res.ok) {
+        if (plan.viaProxy && contentType.includes("json")) {
+          try {
+            const payload = await res.json();
+            if (payload && typeof payload.error === "string") {
+              throw new Error(payload.error);
+            }
+          } catch (error) {
+            if (error instanceof Error && !(error instanceof SyntaxError)) throw error;
+          }
+        }
         if (res.status === 404 || res.status === 405) {
           throw createWpSiteError(res.status, res.statusText);
         }
         throw new Error(`取得失敗: ${res.status} ${res.statusText}`);
       }
 
-      const contentType = String(res.headers.get("content-type") || "").toLowerCase();
       if (!contentType.includes("application/json")) {
         throw createWpSiteError(res.status, res.statusText);
       }
@@ -713,17 +787,93 @@
         throw createWpSiteError(res.status, res.statusText);
       }
 
+      if (plan.viaProxy && data && typeof data.error === "string" && !Array.isArray(data)) {
+        throw new Error(data.error);
+      }
       if (!Array.isArray(data)) {
         throw createWpSiteError(res.status, res.statusText);
       }
       return { data, totalPages };
     }
 
-    async function fetchAllMediaProgressively(baseUrl, maxPages, dateQuery, startPage) {
-      const apiUrl = `${baseUrl}/wp-json/wp/v2/media`;
+    async function tryBaseUrl(base, page, dateQuery) {
+      const apiUrl = `${base}/wp-json/wp/v2/media`;
+      const directBlocked = isBlockedHttpUrl(apiUrl);
 
+      if (!directBlocked) {
+        const plan = { base, apiUrl, viaProxy: false };
+        try {
+          const result = await fetchMediaPageWithPlan(plan, page, dateQuery);
+          return { plan, result, error: null };
+        } catch (error) {
+          if (!isTransportError(error)) {
+            return { plan: null, result: null, error };
+          }
+          const proxied = await tryProxy(base, apiUrl, page, dateQuery);
+          return proxied.error ? { plan: null, result: null, error: proxied.error || error } : proxied;
+        }
+      }
+
+      return tryProxy(base, apiUrl, page, dateQuery);
+    }
+
+    async function tryProxy(base, apiUrl, page, dateQuery) {
+      if (!canUseSameOriginProxy()) {
+        return {
+          plan: null,
+          result: null,
+          error: new TypeError("ブラウザがHTTPへの直接取得をブロックしました。")
+        };
+      }
+
+      const plan = { base, apiUrl, viaProxy: true };
+      try {
+        const result = await fetchMediaPageWithPlan(plan, page, dateQuery);
+        return { plan, result, error: null };
+      } catch (error) {
+        return { plan: null, result: null, error };
+      }
+    }
+
+    async function selectRequestPlan(baseUrl, page, dateQuery) {
+      const bases = [baseUrl];
+      const alternate = swapScheme(baseUrl);
+      if (alternate !== baseUrl) bases.push(alternate);
+
+      let firstError = null;
+      for (const base of bases) {
+        const outcome = await tryBaseUrl(base, page, dateQuery);
+        if (outcome.result) return outcome;
+        if (!firstError) firstError = outcome.error;
+        const message = String(outcome.error?.message || "");
+        const retryOtherScheme = isTransportError(outcome.error)
+          || isNotWordPressError(outcome.error)
+          || /接続|タイムアウト|ブロック/.test(message);
+        if (!retryOtherScheme) break;
+      }
+      return { plan: null, result: null, error: firstError };
+    }
+
+    async function fetchMediaPage(baseUrl, page, dateQuery) {
+      if (requestPlan) {
+        return fetchMediaPageWithPlan(requestPlan, page, dateQuery);
+      }
+
+      const selected = await selectRequestPlan(baseUrl, page, dateQuery);
+      if (!selected.plan) {
+        throw selected.error || new Error("メディアを取得できませんでした。");
+      }
+      requestPlan = selected.plan;
+      if (selected.plan.base !== baseUrl) {
+        targetHostEl.textContent = `対象: ${selected.plan.base}`;
+      }
+      return selected.result;
+    }
+
+    async function fetchAllMediaProgressively(baseUrl, maxPages, dateQuery, startPage) {
+      requestPlan = null;
       const firstPage = startPage ?? 1;
-      const first = await fetchMediaPage(apiUrl, firstPage, dateQuery);
+      const first = await fetchMediaPage(baseUrl, firstPage, dateQuery);
       const totalPages = first.totalPages;
 
       if (firstPage > totalPages) {
@@ -742,7 +892,7 @@
       setStatus(`取得中... ${firstPage}/${firstPage + targetPages - 1} ページ (${displayedCount} 件表示中)`);
 
       for (let page = firstPage + 1; page <= firstPage + targetPages - 1; page += 1) {
-        const next = await fetchMediaPage(apiUrl, page, dateQuery);
+        const next = await fetchMediaPage(baseUrl, page, dateQuery);
         all = all.concat(next.data);
         filteredSoFar = all.filter(isOriginalUploadMedia);
         currentMedia = filteredSoFar;
@@ -758,6 +908,7 @@
       updateResultCounts(0, 0);
       currentMedia = [];
       renderedKeys = new Set();
+      requestPlan = null;
       keywordFilterInput.value = "";
 
       try {
@@ -787,6 +938,8 @@
           : `${displayedCount} 件（全 ${totalCount} 件中）`;
         if (cached?.cachedAt) {
           setStatus(`完了(キャッシュ): ${countLabel}を表示しました。保存時刻 ${new Date(cached.cachedAt).toLocaleString()}`);
+        } else if (requestPlan?.viaProxy) {
+          setStatus(`完了(中継取得): ${countLabel}を表示しました。`);
         } else {
           setStatus(`完了(新規取得): ${countLabel}を表示しました。`);
         }

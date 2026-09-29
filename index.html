@@ -467,14 +467,8 @@
           const img = document.createElement("img");
           img.className = "thumb";
           img.loading = "lazy";
-          img.src = mediaDisplayUrl(candidateThumbs[0]);
           img.alt = item.alt_text || item.title?.rendered || "video thumbnail";
-          img.onerror = () => {
-            const placeholder = document.createElement("div");
-            placeholder.className = "thumb-placeholder";
-            placeholder.textContent = "NO IMAGE";
-            img.replaceWith(placeholder);
-          };
+          assignThumb(img, candidateThumbs[0]);
           card.appendChild(img);
         } else {
           const placeholder = document.createElement("div");
@@ -486,8 +480,8 @@
         const img = document.createElement("img");
         img.className = "thumb";
         img.loading = "lazy";
-        img.src = mediaDisplayUrl(item.source_url);
         img.alt = item.alt_text || item.title?.rendered || "image";
+        assignThumb(img, item.source_url);
         card.appendChild(img);
       }
 
@@ -683,9 +677,31 @@
       return filteredMedia.length;
     }
 
-    function canUseSameOriginProxy() {
-      return location.protocol === "http:" || location.protocol === "https:";
-    }
+    const MEDIA_PAGE_SIZE = 100;
+    const DIRECT_STRATEGY = {
+      label: "direct",
+      buildUrl(targetUrl) { return targetUrl; }
+    };
+    const MEDIA_PROXY_STRATEGIES = [
+      {
+        label: "codetabs",
+        buildUrl(targetUrl) {
+          return `https://api.codetabs.com/v1/proxy/?quest=${encodeURIComponent(targetUrl)}`;
+        }
+      },
+      {
+        label: "allorigins",
+        buildUrl(targetUrl) {
+          return `https://api.allorigins.win/raw?url=${encodeURIComponent(targetUrl)}`;
+        }
+      },
+      {
+        label: "cors.eu.org",
+        buildUrl(targetUrl) {
+          return `https://cors.eu.org/${targetUrl}`;
+        }
+      }
+    ];
 
     function isBlockedHttpUrl(targetUrl) {
       if (!window.isSecureContext) return false;
@@ -699,15 +715,52 @@
       }
     }
 
-    function mediaDisplayUrl(url) {
-      if (!url || !isBlockedHttpUrl(url) || !canUseSameOriginProxy()) return url;
-      return buildProxyUrl(url);
+    function strategiesFor(targetUrl) {
+      if (isBlockedHttpUrl(targetUrl)) return MEDIA_PROXY_STRATEGIES;
+      return [DIRECT_STRATEGY, ...MEDIA_PROXY_STRATEGIES];
     }
 
-    function buildProxyUrl(targetUrl) {
-      const proxy = new URL("/wp-proxy", window.location.origin);
-      proxy.searchParams.set("url", targetUrl);
-      return proxy.toString();
+    function thumbCandidates(url) {
+      if (!url || !isBlockedHttpUrl(url)) return [url];
+      const proxies = MEDIA_PROXY_STRATEGIES.slice();
+      const preferred = requestPlan?.strategy;
+      if (preferred && preferred.label !== "direct") {
+        const index = proxies.findIndex((item) => item.label === preferred.label);
+        if (index > 0) {
+          proxies.unshift(proxies.splice(index, 1)[0]);
+        }
+      }
+      return proxies.map((item) => item.buildUrl(url));
+    }
+
+    function assignThumb(img, url) {
+      const candidates = thumbCandidates(url).filter(Boolean);
+      let index = 0;
+      img.onerror = () => {
+        index += 1;
+        if (index >= candidates.length) {
+          const placeholder = document.createElement("div");
+          placeholder.className = "thumb-placeholder";
+          placeholder.textContent = "NO IMAGE";
+          img.replaceWith(placeholder);
+          return;
+        }
+        img.src = candidates[index];
+      };
+      if (candidates.length === 0) {
+        img.onerror();
+        return;
+      }
+      img.src = candidates[0];
+    }
+
+    function isBadProxyPayload(text) {
+      const trimmed = String(text || "").trim();
+      if (!trimmed) return true;
+      if (trimmed.startsWith("{") && /"Error"|corsfix_error|corsproxy|Bad request/i.test(trimmed)) return true;
+      if (/^Oops\.\.\. Request Timeout\.$/i.test(trimmed)) return true;
+      if (/error code:\s*52\d/i.test(trimmed)) return true;
+      return false;
     }
 
     function swapScheme(baseUrl) {
@@ -718,127 +771,123 @@
     }
 
     function isTransportError(error) {
-      return error?.name === "TypeError" || error?.proxyMissing === true;
+      return error?.transport === true || error?.name === "TypeError" || error?.name === "TimeoutError" || error?.name === "AbortError";
     }
 
     function isNotWordPressError(error) {
       return typeof error?.message === "string" && error.message.includes("WordPressサイトではない可能性");
     }
 
+    function transportError(message) {
+      const error = new TypeError(message);
+      error.transport = true;
+      return error;
+    }
+
     async function fetchMediaPageWithPlan(plan, page, dateQuery) {
       const params = new URLSearchParams({
-        per_page: "100",
+        per_page: String(MEDIA_PAGE_SIZE),
         page: String(page)
       });
       if (dateQuery?.after) params.set("after", dateQuery.after);
       if (dateQuery?.before) params.set("before", dateQuery.before);
 
       const targetUrl = `${plan.apiUrl}?${params.toString()}`;
-      const requestUrl = plan.viaProxy ? buildProxyUrl(targetUrl) : targetUrl;
+      const requestUrl = plan.strategy.buildUrl(targetUrl);
+      const viaProxy = plan.strategy.label !== "direct";
       let res;
       try {
         res = await fetch(requestUrl, {
-          headers: { Accept: "application/json" }
+          headers: { Accept: "application/json" },
+          signal: AbortSignal.timeout(20000)
         });
       } catch (error) {
-        if (error?.name === "TypeError") {
-          throw new TypeError(
-            plan.viaProxy
-              ? "中継サーバーへの接続に失敗しました。"
+        if (error?.name === "TypeError" || error?.name === "TimeoutError" || error?.name === "AbortError") {
+          throw transportError(
+            viaProxy
+              ? `${plan.strategy.label} での中継に失敗しました。`
               : "サイトへ接続できませんでした。CORS制限、またはブラウザがHTTP通信をブロックした可能性があります。"
           );
         }
         throw error;
       }
 
-      const contentType = String(res.headers.get("content-type") || "").toLowerCase();
-      if (plan.viaProxy && res.status === 404 && !contentType.includes("json")) {
-        const missing = new TypeError("HTTPサイトを中継する /wp-proxy が見つかりません。server.py で配信してください。");
-        missing.proxyMissing = true;
-        throw missing;
+      if (viaProxy && (res.status === 401 || res.status === 403 || res.status === 429 || res.status >= 500)) {
+        throw transportError(`${plan.strategy.label} が利用できません (${res.status})。`);
+      }
+
+      const text = await res.text();
+      if (viaProxy && isBadProxyPayload(text)) {
+        throw transportError(`${plan.strategy.label} の応答が無効です。`);
+      }
+
+      let data;
+      try {
+        data = JSON.parse(text);
+      } catch (_) {
+        if (viaProxy) {
+          throw transportError(`${plan.strategy.label} の応答を解釈できませんでした。`);
+        }
+        throw createWpSiteError(res.status, res.statusText);
+      }
+
+      if (data && data.code === "rest_post_invalid_page_number") {
+        if (page > 1) return { data: [], totalPages: page - 1, exhausted: true };
+        throw createWpSiteError(res.status || 400, res.statusText);
       }
 
       if (!res.ok) {
-        if (plan.viaProxy && contentType.includes("json")) {
-          try {
-            const payload = await res.json();
-            if (payload && typeof payload.error === "string") {
-              throw new Error(payload.error);
-            }
-          } catch (error) {
-            if (error instanceof Error && !(error instanceof SyntaxError)) throw error;
-          }
-        }
         if (res.status === 404 || res.status === 405) {
           throw createWpSiteError(res.status, res.statusText);
         }
         throw new Error(`取得失敗: ${res.status} ${res.statusText}`);
       }
 
-      if (!contentType.includes("application/json")) {
-        throw createWpSiteError(res.status, res.statusText);
-      }
-
-      const totalPages = Number(res.headers.get("X-WP-TotalPages") || "1");
-      let data;
-      try {
-        data = await res.json();
-      } catch (_) {
-        throw createWpSiteError(res.status, res.statusText);
-      }
-
-      if (plan.viaProxy && data && typeof data.error === "string" && !Array.isArray(data)) {
-        throw new Error(data.error);
-      }
       if (!Array.isArray(data)) {
+        if (viaProxy) {
+          throw transportError(`${plan.strategy.label} の応答形式が不正です。`);
+        }
         throw createWpSiteError(res.status, res.statusText);
       }
-      return { data, totalPages };
+
+      const totalHeader = res.headers.get("X-WP-TotalPages");
+      const totalPages = totalHeader ? Number(totalHeader) : null;
+      const exhausted = totalPages != null ? page >= totalPages : data.length < MEDIA_PAGE_SIZE;
+      return { data, totalPages, exhausted };
     }
 
     async function tryBaseUrl(base, page, dateQuery) {
       const apiUrl = `${base}/wp-json/wp/v2/media`;
-      const directBlocked = isBlockedHttpUrl(apiUrl);
+      const strategies = strategiesFor(apiUrl);
+      let lastError = null;
 
-      if (!directBlocked) {
-        const plan = { base, apiUrl, viaProxy: false };
+      for (const strategy of strategies) {
+        const plan = { base, apiUrl, strategy };
         try {
           const result = await fetchMediaPageWithPlan(plan, page, dateQuery);
           return { plan, result, error: null };
         } catch (error) {
+          lastError = error;
           if (!isTransportError(error)) {
             return { plan: null, result: null, error };
           }
-          const proxied = await tryProxy(base, apiUrl, page, dateQuery);
-          return proxied.error ? { plan: null, result: null, error: proxied.error || error } : proxied;
         }
       }
 
-      return tryProxy(base, apiUrl, page, dateQuery);
-    }
-
-    async function tryProxy(base, apiUrl, page, dateQuery) {
-      if (!canUseSameOriginProxy()) {
-        return {
-          plan: null,
-          result: null,
-          error: new TypeError("ブラウザがHTTPへの直接取得をブロックしました。")
-        };
-      }
-
-      const plan = { base, apiUrl, viaProxy: true };
-      try {
-        const result = await fetchMediaPageWithPlan(plan, page, dateQuery);
-        return { plan, result, error: null };
-      } catch (error) {
-        return { plan: null, result: null, error };
-      }
+      return {
+        plan: null,
+        result: null,
+        error: lastError || transportError("サイトへ接続できませんでした。")
+      };
     }
 
     async function selectRequestPlan(baseUrl, page, dateQuery) {
-      const bases = [baseUrl];
       const alternate = swapScheme(baseUrl);
-      if (alternate !== baseUrl) bases.push(alternate);
+      const httpBlocked = isBlockedHttpUrl(`${baseUrl}/wp-json/wp/v2/media`);
+      const bases = [];
+      if (httpBlocked && alternate !== baseUrl) bases.push(alternate);
+      bases.push(baseUrl);
+      if (!httpBlocked && alternate !== baseUrl) bases.push(alternate);
 
       let firstError = null;
       for (const base of bases) {
@@ -849,6 +898,7 @@
         const retryOtherScheme = isTransportError(outcome.error)
           || isNotWordPressError(outcome.error)
           || /接続|タイムアウト|ブロック/.test(message);
+        if (base !== baseUrl && httpBlocked) continue;
         if (!retryOtherScheme) break;
       }
       return { plan: null, result: null, error: firstError };
@@ -870,34 +920,55 @@
       return selected.result;
     }
 
+    function progressText(page, endPage, count) {
+      const pageLabel = endPage == null ? `${page} ページ` : `${page}/${endPage} ページ`;
+      return `取得中... ${pageLabel} (${count} 件表示中)`;
+    }
+
     async function fetchAllMediaProgressively(baseUrl, maxPages, dateQuery, startPage) {
       requestPlan = null;
       const firstPage = startPage ?? 1;
       const first = await fetchMediaPage(baseUrl, firstPage, dateQuery);
-      const totalPages = first.totalPages;
 
-      if (firstPage > totalPages) {
+      if ((first.totalPages != null && firstPage > first.totalPages) || (first.exhausted && first.data.length === 0)) {
         setStatus(`指定された開始ページ(${firstPage})以降にデータがありません。`, false);
         return [];
       }
 
-      const targetPages = maxPages == null
-        ? (totalPages - firstPage + 1)
-        : Math.min(totalPages - firstPage + 1, maxPages);
+      let endPage = null;
+      if (first.totalPages != null) {
+        const available = first.totalPages - firstPage + 1;
+        const limited = maxPages == null ? available : Math.min(available, maxPages);
+        endPage = firstPage + limited - 1;
+      } else if (maxPages != null) {
+        endPage = firstPage + maxPages - 1;
+      }
 
       let all = [...first.data];
       let filteredSoFar = all.filter(isOriginalUploadMedia);
       currentMedia = filteredSoFar;
       let displayedCount = renderCurrentMediaByFilter(true);
-      setStatus(`取得中... ${firstPage}/${firstPage + targetPages - 1} ページ (${displayedCount} 件表示中)`);
+      setStatus(progressText(firstPage, endPage, displayedCount));
 
-      for (let page = firstPage + 1; page <= firstPage + targetPages - 1; page += 1) {
+      let page = firstPage;
+      let exhausted = first.exhausted;
+      while (!exhausted) {
+        if (maxPages != null && (page - firstPage + 1) >= maxPages) break;
+        if (endPage != null && page >= endPage) break;
+        page += 1;
         const next = await fetchMediaPage(baseUrl, page, dateQuery);
+        if (next.data.length === 0) break;
         all = all.concat(next.data);
         filteredSoFar = all.filter(isOriginalUploadMedia);
         currentMedia = filteredSoFar;
         displayedCount = renderCurrentMediaByFilter(true);
-        setStatus(`取得中... ${page}/${firstPage + targetPages - 1} ページ (${displayedCount} 件表示中)`);
+        if (next.totalPages != null && endPage == null) {
+          const available = next.totalPages - firstPage + 1;
+          const limited = maxPages == null ? available : Math.min(available, maxPages);
+          endPage = firstPage + limited - 1;
+        }
+        setStatus(progressText(page, endPage, displayedCount));
+        exhausted = next.exhausted;
       }
       return filteredSoFar;
     }
@@ -938,7 +1009,7 @@
           : `${displayedCount} 件（全 ${totalCount} 件中）`;
         if (cached?.cachedAt) {
           setStatus(`完了(キャッシュ): ${countLabel}を表示しました。保存時刻 ${new Date(cached.cachedAt).toLocaleString()}`);
-        } else if (requestPlan?.viaProxy) {
+        } else if (requestPlan?.strategy && requestPlan.strategy.label !== "direct") {
           setStatus(`完了(中継取得): ${countLabel}を表示しました。`);
         } else {
           setStatus(`完了(新規取得): ${countLabel}を表示しました。`);

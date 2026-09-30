@@ -642,6 +642,7 @@
     let historyCache = [];
     let activeHistoryId = null;
     let historyMutated = false;
+    let currentMediaBaseUrl = "";
 
     function getCacheKey(baseUrl, id) {
       return `${CACHE_PREFIX}${baseUrl}:${id}`;
@@ -660,19 +661,36 @@
       }
     }
 
-    function slimMediaItem(item) {
+    function resolveMediaUrl(url, baseUrl = currentMediaBaseUrl) {
+      const value = String(url || "").trim();
+      if (!value || /^https?:\/\//i.test(value)) return value;
+      const base = String(baseUrl || currentMediaBaseUrl || "").trim();
+      if (!base) return value;
+      try {
+        const withProtocol = /^https?:\/\//i.test(base) ? base : `https://${base}`;
+        return new URL(value, withProtocol).href;
+      } catch (_) {
+        return value;
+      }
+    }
+
+    function slimMediaItem(item, baseUrl = currentMediaBaseUrl) {
       const sizes = item?.media_details?.sizes || {};
-      const pickSize = (size) => (size?.source_url ? { source_url: size.source_url } : undefined);
+      const pickSize = (size) => (
+        size?.source_url ? { source_url: resolveMediaUrl(size.source_url, baseUrl) } : undefined
+      );
       return {
         id: item.id,
-        source_url: item.source_url,
+        source_url: resolveMediaUrl(item.source_url, baseUrl),
         media_type: item.media_type,
         mime_type: item.mime_type,
         title: item.title,
         alt_text: item.alt_text,
         slug: item.slug,
         caption: item.caption,
-        featured_media_src_url: item.featured_media_src_url,
+        featured_media_src_url: item.featured_media_src_url
+          ? resolveMediaUrl(item.featured_media_src_url, baseUrl)
+          : item.featured_media_src_url,
         media_details: {
           sizes: {
             medium: pickSize(sizes.medium),
@@ -1002,7 +1020,9 @@
       progressFillEl.style.width = "100%";
       targetHostEl.textContent = "対象: 検索履歴";
 
-      matches.forEach(({ item }) => appendFoundMedia(item));
+      matches.forEach(({ item, entry }) => {
+        appendFoundMedia(item, entry?.conditions?.siteUrl || "");
+      });
 
       const found = foundIds.size;
       checkedCountEl.textContent = String(found);
@@ -1080,6 +1100,7 @@
       }
 
       activeHistoryId = entry.id;
+      currentMediaBaseUrl = conditions.siteUrl || "";
       targetHostEl.textContent = `対象: ${conditions.siteUrl || "-"}`;
       foundIds = new Set();
       foundItems = [];
@@ -1503,17 +1524,18 @@
       return card;
     }
 
-    function appendFoundMedia(item) {
-      const key = String(item.id ?? item.source_url);
+    function appendFoundMedia(item, baseUrl = currentMediaBaseUrl) {
+      const normalized = slimMediaItem(item, baseUrl || currentMediaBaseUrl);
+      const key = String(normalized.id ?? normalized.source_url);
       if (foundIds.has(key)) return;
       foundIds.add(key);
-      foundItems.push(slimMediaItem(item));
+      foundItems.push(normalized);
 
       if (gridEl.querySelector(".empty")) {
         gridEl.innerHTML = "";
       }
 
-      gridEl.appendChild(createCard(item));
+      gridEl.appendChild(createCard(normalized));
       applyResultFilter();
     }
 
@@ -1596,7 +1618,7 @@
           return false;
         }
 
-        saveCachedMedia(baseUrl, id, { exists: true, item: slimMediaItem(data) });
+        saveCachedMedia(baseUrl, id, { exists: true, item: slimMediaItem(data, baseUrl) });
         return data;
       } catch (error) {
         if (error?.name === "AbortError") return null;
@@ -1790,6 +1812,7 @@
         rateLimiter = createRateLimiter();
 
         targetHostEl.textContent = `対象: ${baseUrl}`;
+        currentMediaBaseUrl = baseUrl;
         resetResults();
         updateProgress(0, total);
         setScanning(true);
@@ -1875,13 +1898,14 @@
 
         const requestIntervalMs = parseInt(requestIntervalInput.value, 10);
         targetHostEl.textContent = `対象: ${baseUrl}`;
+        currentMediaBaseUrl = baseUrl;
 
         const cached = loadSearchCache(baseUrl, keyword, limit);
         if (cached) {
           resetResults();
           updateProgress(1, 1);
           cached.items.forEach((item) => {
-            saveCachedMedia(baseUrl, item.id, { exists: true, item: slimMediaItem(item) });
+            saveCachedMedia(baseUrl, item.id, { exists: true, item: slimMediaItem(item, baseUrl) });
             appendFoundMedia(item);
           });
           cacheCountEl.textContent = String(cached.items.length);
@@ -1925,7 +1949,7 @@
 
           for (const item of result.data) {
             if (!item?.source_url || !getMediaKind(item)) continue;
-            const slim = slimMediaItem(item);
+            const slim = slimMediaItem(item, baseUrl);
             saveCachedMedia(baseUrl, item.id, { exists: true, item: slim });
             collected.push(slim);
             appendFoundMedia(slim);

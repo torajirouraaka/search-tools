@@ -73,6 +73,10 @@
       background: #0b1220;
       color: var(--text);
     }
+    select.sort-order {
+      width: auto;
+      min-width: 11.5rem;
+    }
     button {
       padding: 10px 14px;
       border: 0;
@@ -229,6 +233,16 @@
       </div>
       <div class="filter" id="mediaFilter">
         <input id="keywordFilter" type="search" placeholder="URL・ファイル名・タイトルで絞り込み" aria-label="キーワード絞り込み" />
+        <select id="sortOrder" class="sort-order" aria-label="並び順">
+          <option value="date-desc">新しい順</option>
+          <option value="date-asc">古い順</option>
+          <option value="name-asc">ファイル名（昇順）</option>
+          <option value="name-desc">ファイル名（降順）</option>
+          <option value="title-asc">タイトル（昇順）</option>
+          <option value="title-desc">タイトル（降順）</option>
+          <option value="size-desc">容量が大きい順</option>
+          <option value="size-asc">容量が小さい順</option>
+        </select>
         <label><input type="radio" name="mediaType" value="all" checked> すべて</label>
         <label><input type="radio" name="mediaType" value="image"> 画像のみ</label>
         <label><input type="radio" name="mediaType" value="video"> 動画のみ</label>
@@ -254,9 +268,11 @@
     const targetHostEl = document.getElementById("targetHost");
     const mediaFilterEl = document.getElementById("mediaFilter");
     const keywordFilterInput = document.getElementById("keywordFilter");
+    const sortOrderInput = document.getElementById("sortOrder");
     const CACHE_PREFIX = "wp-media-cache-v1:";
+    const htmlDecoder = document.createElement("textarea");
     let currentMedia = [];
-    let renderedKeys = new Set();
+    let cardByKey = new Map();
     let keywordFilterTimer = null;
 
     function setStatus(text, isError = false) {
@@ -559,6 +575,63 @@
       return String(item.id ?? item.source_url ?? Math.random());
     }
 
+    function decodeHtml(value) {
+      htmlDecoder.innerHTML = String(value ?? "");
+      return htmlDecoder.value;
+    }
+
+    function getFilename(item) {
+      try {
+        const name = new URL(item.source_url).pathname.split("/").pop() || "";
+        return decodeURIComponent(name);
+      } catch (_) {
+        return String(item.source_url || "");
+      }
+    }
+
+    function getSortValue(item, key) {
+      if (key === "date") {
+        const time = Date.parse(item.date || item.date_gmt || "");
+        return Number.isFinite(time) ? time : 0;
+      }
+      if (key === "name") return getFilename(item);
+      if (key === "title") return decodeHtml(item.title?.rendered || item.slug || getFilename(item));
+      if (key === "size") {
+        const size = Number(item?.media_details?.filesize ?? item?.filesize ?? item?.media_details?.file_size ?? 0);
+        return Number.isFinite(size) ? size : 0;
+      }
+      return Number(item.id) || 0;
+    }
+
+    function sortMedia(items) {
+      const mode = sortOrderInput.value || "date-desc";
+      const dash = mode.lastIndexOf("-");
+      const key = mode.slice(0, dash);
+      const direction = mode.slice(dash + 1);
+      const sign = direction === "asc" ? 1 : -1;
+      const decorated = items.map((item, index) => ({
+        item,
+        index,
+        value: getSortValue(item, key)
+      }));
+
+      decorated.sort((a, b) => {
+        let cmp = 0;
+        if (typeof a.value === "string" || typeof b.value === "string") {
+          cmp = String(a.value).localeCompare(String(b.value), "ja", { numeric: true, sensitivity: "base" });
+        } else if (a.value !== b.value) {
+          cmp = a.value < b.value ? -1 : 1;
+        }
+        if (cmp === 0) {
+          const idCmp = (Number(b.item.id) || 0) - (Number(a.item.id) || 0);
+          return idCmp !== 0 ? idCmp : a.index - b.index;
+        }
+        return cmp * sign;
+      });
+
+      return decorated.map((entry) => entry.item);
+    }
+
     function filterMediaByType(items, mediaType) {
       if (mediaType === "image") {
         return items.filter((item) => getMediaKind(item) === "image");
@@ -620,7 +693,7 @@
     }
 
     function applyMediaFilters(items) {
-      return filterByKeyword(filterByUsage(filterMediaByType(items, getSelectedFilterType())));
+      return sortMedia(filterByKeyword(filterByUsage(filterMediaByType(items, getSelectedFilterType()))));
     }
 
     function isFilterActive() {
@@ -636,48 +709,46 @@
       totalCountEl.textContent = String(totalCount);
     }
 
-    function renderMediaList(items, totalCount = currentMedia.length) {
-      gridEl.innerHTML = "";
-      renderedKeys = new Set();
-
-      if (items.length === 0 && totalCount > 0) {
-        const empty = document.createElement("div");
-        empty.className = "empty-filter";
-        empty.textContent = isFilterActive()
-          ? "条件に一致するメディアがありません。フィルタ条件を変更してください。"
-          : "表示できるメディアがありません。";
-        gridEl.appendChild(empty);
-      } else {
-        items.forEach((item) => {
-          renderedKeys.add(getItemRenderKey(item));
-          gridEl.appendChild(createCard(item));
-        });
-      }
-
-      updateResultCounts(items.length, totalCount);
+    function resetMediaGrid() {
+      cardByKey = new Map();
+      gridEl.replaceChildren();
     }
 
-    function renderCurrentMediaByFilter(incremental = false) {
+    function renderCurrentMediaByFilter() {
       const filteredMedia = applyMediaFilters(currentMedia);
       const totalCount = currentMedia.length;
 
-      if (!incremental) {
-        renderMediaList(filteredMedia, totalCount);
-        return filteredMedia.length;
+      if (filteredMedia.length === 0) {
+        cardByKey = new Map();
+        gridEl.replaceChildren();
+        if (totalCount > 0) {
+          const empty = document.createElement("div");
+          empty.className = "empty-filter";
+          empty.textContent = isFilterActive()
+            ? "条件に一致するメディアがありません。フィルタ条件を変更してください。"
+            : "表示できるメディアがありません。";
+          gridEl.appendChild(empty);
+        }
+        updateResultCounts(0, totalCount);
+        return 0;
       }
 
+      const nextKeys = new Set();
       const fragment = document.createDocumentFragment();
-      let appendedCount = 0;
       filteredMedia.forEach((item) => {
         const key = getItemRenderKey(item);
-        if (renderedKeys.has(key)) return;
-        renderedKeys.add(key);
-        fragment.appendChild(createCard(item));
-        appendedCount += 1;
+        nextKeys.add(key);
+        let card = cardByKey.get(key);
+        if (!card) {
+          card = createCard(item);
+          cardByKey.set(key, card);
+        }
+        fragment.appendChild(card);
       });
-      if (appendedCount > 0) {
-        gridEl.appendChild(fragment);
+      for (const key of cardByKey.keys()) {
+        if (!nextKeys.has(key)) cardByKey.delete(key);
       }
+      gridEl.replaceChildren(fragment);
       updateResultCounts(filteredMedia.length, totalCount);
       return filteredMedia.length;
     }
@@ -737,8 +808,8 @@
 
       let all = [...first.data];
       let filteredSoFar = all.filter(isOriginalUploadMedia);
-      currentMedia = filteredSoFar;
-      let displayedCount = renderCurrentMediaByFilter(true);
+        currentMedia = filteredSoFar;
+        let displayedCount = renderCurrentMediaByFilter();
       setStatus(`取得中... ${firstPage}/${firstPage + targetPages - 1} ページ (${displayedCount} 件表示中)`);
 
       for (let page = firstPage + 1; page <= firstPage + targetPages - 1; page += 1) {
@@ -746,7 +817,7 @@
         all = all.concat(next.data);
         filteredSoFar = all.filter(isOriginalUploadMedia);
         currentMedia = filteredSoFar;
-        displayedCount = renderCurrentMediaByFilter(true);
+        displayedCount = renderCurrentMediaByFilter();
         setStatus(`取得中... ${page}/${firstPage + targetPages - 1} ページ (${displayedCount} 件表示中)`);
       }
       return filteredSoFar;
@@ -754,10 +825,9 @@
 
     async function loadMedia() {
       loadBtn.disabled = true;
-      gridEl.innerHTML = "";
+      resetMediaGrid();
       updateResultCounts(0, 0);
       currentMedia = [];
-      renderedKeys = new Set();
       keywordFilterInput.value = "";
 
       try {
@@ -801,14 +871,15 @@
       }
     }
 
-    function handleFilterChange() {
+    function handleFilterChange(event) {
       try {
         const filteredCount = renderCurrentMediaByFilter();
         if (currentMedia.length > 0) {
           const suffix = isFilterActive()
             ? `（全 ${currentMedia.length} 件中）`
             : "";
-          setStatus(`フィルタ適用: ${filteredCount} 件を表示中${suffix}`);
+          const label = event?.target?.id === "sortOrder" ? "並び替え" : "フィルタ適用";
+          setStatus(`${label}: ${filteredCount} 件を表示中${suffix}`);
         }
       } catch (err) {
         const message = err instanceof Error ? err.message : String(err);

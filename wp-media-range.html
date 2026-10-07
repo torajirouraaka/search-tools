@@ -390,9 +390,42 @@
 
     .history-list {
       display: grid;
-      gap: 8px;
-      max-height: 320px;
+      gap: 14px;
+      max-height: 480px;
       overflow: auto;
+    }
+
+    .history-group {
+      display: grid;
+      gap: 8px;
+    }
+
+    .history-group-head {
+      display: flex;
+      justify-content: space-between;
+      align-items: baseline;
+      gap: 8px;
+      padding: 0 2px;
+    }
+
+    .history-group-domain {
+      color: var(--text);
+      font-weight: 700;
+      font-size: 0.95rem;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+    }
+
+    .history-group-count {
+      flex: none;
+      color: var(--muted);
+      font-size: 0.8rem;
+    }
+
+    .history-group-items {
+      display: grid;
+      gap: 8px;
     }
 
     .history-item {
@@ -554,7 +587,7 @@
         <h2>検索履歴</h2>
         <button id="clearHistoryBtn" class="ghost" type="button">履歴をすべて削除</button>
       </div>
-      <p class="history-lead">検索・ID範囲チェックの条件と、そのときに見つかったメディア一覧をこの端末に保存します。履歴を選ぶと再表示できます。ファイル名を指定すると、保存済みメディアから直接探せます。</p>
+      <p class="history-lead">検索・ID範囲チェックの条件と、そのときに見つかったメディア一覧をこの端末に保存します。履歴はドメインごとにまとめ、ID範囲の小さい順に並べます。履歴を選ぶと再表示できます。ファイル名を指定すると、保存済みメディアから直接探せます。</p>
       <div class="history-search">
         <label for="historyFilenameInput">ファイル名で履歴を検索</label>
         <div class="history-search-row">
@@ -881,6 +914,56 @@
       }
     }
 
+    function historyDomainKey(entry) {
+      const siteUrl = String(entry?.conditions?.siteUrl || "").trim();
+      if (!siteUrl) return "(ドメイン不明)";
+      try {
+        const withProtocol = /^https?:\/\//i.test(siteUrl) ? siteUrl : `https://${siteUrl}`;
+        const hostname = new URL(withProtocol).hostname.replace(/^www\./i, "");
+        return hostname || siteUrl;
+      } catch (_) {
+        return siteUrl;
+      }
+    }
+
+    function compareHistoryByRange(a, b) {
+      const startOf = (entry) => {
+        const raw = entry?.conditions?.rangeStart;
+        if (raw === "" || raw === null || raw === undefined) return Number.POSITIVE_INFINITY;
+        const start = Number(raw);
+        return Number.isFinite(start) ? start : Number.POSITIVE_INFINITY;
+      };
+      const endOf = (entry) => {
+        const start = startOf(entry);
+        if (!Number.isFinite(start)) return Number.POSITIVE_INFINITY;
+        const count = Number(entry?.conditions?.rangeCount);
+        return Number.isFinite(count) && count > 0 ? start + count - 1 : start;
+      };
+      const startDiff = startOf(a) - startOf(b);
+      if (startDiff !== 0) return startDiff;
+      const endDiff = endOf(a) - endOf(b);
+      if (endDiff !== 0) return endDiff;
+      const typeRank = (entry) => (entry?.type === "scan" ? 0 : 1);
+      const typeDiff = typeRank(a) - typeRank(b);
+      if (typeDiff !== 0) return typeDiff;
+      return describeHistoryEntry(a).title.localeCompare(describeHistoryEntry(b).title, "ja");
+    }
+
+    function groupHistoryRows(rows) {
+      const groups = new Map();
+      rows.forEach((row) => {
+        const domain = historyDomainKey(row.entry);
+        if (!groups.has(domain)) groups.set(domain, []);
+        groups.get(domain).push(row);
+      });
+      return [...groups.entries()]
+        .map(([domain, items]) => ({
+          domain,
+          items: items.slice().sort((left, right) => compareHistoryByRange(left.entry, right.entry))
+        }))
+        .sort((left, right) => left.domain.localeCompare(right.domain, "ja"));
+    }
+
     function describeHistoryEntry(entry) {
       const conditions = entry?.conditions || {};
       const siteUrl = conditions.siteUrl || "-";
@@ -929,68 +1012,94 @@
       }
 
       historyListEl.innerHTML = "";
-      visibleEntries.forEach(({ entry, matchCount }) => {
-        const label = describeHistoryEntry(entry);
-        const item = document.createElement("div");
-        item.className = "history-item";
-        if (entry.id === activeHistoryId) {
-          item.classList.add("is-active");
-        }
+      groupHistoryRows(visibleEntries).forEach(({ domain, items }) => {
+        const group = document.createElement("section");
+        group.className = "history-group";
 
-        const main = document.createElement("div");
-        main.className = "history-item-main";
+        const head = document.createElement("div");
+        head.className = "history-group-head";
 
-        const title = document.createElement("div");
-        title.className = "history-item-title";
-        title.textContent = `${label.badge} / ${label.title}`;
-        main.appendChild(title);
+        const domainEl = document.createElement("div");
+        domainEl.className = "history-group-domain";
+        domainEl.textContent = domain;
 
-        const meta = document.createElement("div");
-        meta.className = "history-item-meta";
-        const when = entry.createdAt ? new Date(entry.createdAt).toLocaleString() : "-";
-        const count = Number.isFinite(entry.itemCount) ? entry.itemCount : (entry.items || []).length;
-        meta.innerHTML = "";
-        [
-          label.siteUrl,
-          `${count.toLocaleString()} 件`,
-          matchCount > 0 ? `ファイル名一致 ${matchCount.toLocaleString()} 件` : "",
-          when,
-          entry.aborted ? "途中停止" : ""
-        ].filter(Boolean).forEach((text) => {
-          const span = document.createElement("span");
-          span.textContent = text;
-          meta.appendChild(span);
+        const countEl = document.createElement("div");
+        countEl.className = "history-group-count";
+        countEl.textContent = `${items.length.toLocaleString()} 件`;
+
+        head.appendChild(domainEl);
+        head.appendChild(countEl);
+
+        const list = document.createElement("div");
+        list.className = "history-group-items";
+
+        items.forEach(({ entry, matchCount }) => {
+          const label = describeHistoryEntry(entry);
+          const item = document.createElement("div");
+          item.className = "history-item";
+          if (entry.id === activeHistoryId) {
+            item.classList.add("is-active");
+          }
+
+          const main = document.createElement("div");
+          main.className = "history-item-main";
+
+          const title = document.createElement("div");
+          title.className = "history-item-title";
+          title.textContent = `${label.badge} / ${label.title}`;
+          main.appendChild(title);
+
+          const meta = document.createElement("div");
+          meta.className = "history-item-meta";
+          const when = entry.createdAt ? new Date(entry.createdAt).toLocaleString() : "-";
+          const count = Number.isFinite(entry.itemCount) ? entry.itemCount : (entry.items || []).length;
+          meta.innerHTML = "";
+          [
+            label.siteUrl,
+            `${count.toLocaleString()} 件`,
+            matchCount > 0 ? `ファイル名一致 ${matchCount.toLocaleString()} 件` : "",
+            when,
+            entry.aborted ? "途中停止" : ""
+          ].filter(Boolean).forEach((text) => {
+            const span = document.createElement("span");
+            span.textContent = text;
+            meta.appendChild(span);
+          });
+          main.appendChild(meta);
+
+          const actions = document.createElement("div");
+          actions.className = "history-item-actions";
+
+          const restoreBtn = document.createElement("button");
+          restoreBtn.type = "button";
+          restoreBtn.textContent = "表示";
+          restoreBtn.disabled = scanBtn.disabled;
+          restoreBtn.addEventListener("click", () => restoreHistoryEntry(entry));
+
+          const deleteBtn = document.createElement("button");
+          deleteBtn.type = "button";
+          deleteBtn.className = "ghost";
+          deleteBtn.textContent = "削除";
+          deleteBtn.disabled = scanBtn.disabled;
+          deleteBtn.addEventListener("click", (event) => {
+            event.stopPropagation();
+            deleteHistoryEntry(entry.id);
+          });
+
+          actions.appendChild(restoreBtn);
+          actions.appendChild(deleteBtn);
+          item.appendChild(main);
+          item.appendChild(actions);
+          item.addEventListener("click", (event) => {
+            if (event.target.closest("button")) return;
+            restoreHistoryEntry(entry);
+          });
+          list.appendChild(item);
         });
-        main.appendChild(meta);
 
-        const actions = document.createElement("div");
-        actions.className = "history-item-actions";
-
-        const restoreBtn = document.createElement("button");
-        restoreBtn.type = "button";
-        restoreBtn.textContent = "表示";
-        restoreBtn.disabled = scanBtn.disabled;
-        restoreBtn.addEventListener("click", () => restoreHistoryEntry(entry));
-
-        const deleteBtn = document.createElement("button");
-        deleteBtn.type = "button";
-        deleteBtn.className = "ghost";
-        deleteBtn.textContent = "削除";
-        deleteBtn.disabled = scanBtn.disabled;
-        deleteBtn.addEventListener("click", (event) => {
-          event.stopPropagation();
-          deleteHistoryEntry(entry.id);
-        });
-
-        actions.appendChild(restoreBtn);
-        actions.appendChild(deleteBtn);
-        item.appendChild(main);
-        item.appendChild(actions);
-        item.addEventListener("click", (event) => {
-          if (event.target.closest("button")) return;
-          restoreHistoryEntry(entry);
-        });
-        historyListEl.appendChild(item);
+        group.appendChild(head);
+        group.appendChild(list);
+        historyListEl.appendChild(group);
       });
     }
 

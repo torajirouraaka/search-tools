@@ -508,6 +508,21 @@
       font-size: 0.85rem;
     }
 
+    .retry-float {
+      position: fixed;
+      right: 20px;
+      bottom: 20px;
+      z-index: 1000;
+      padding: 14px 18px;
+      border-radius: 999px;
+      box-shadow: 0 12px 32px rgba(0, 0, 0, 0.35);
+      min-width: 88px;
+    }
+
+    .retry-float:disabled {
+      opacity: 0.55;
+    }
+
     @media (max-width: 760px) {
       .wrap { padding: 16px; }
       .controls,
@@ -518,6 +533,11 @@
       .history-domain-bar button { width: auto; }
       .history-item { grid-template-columns: 1fr; }
       .history-item-actions button { flex: 1; width: auto; }
+      .retry-float {
+        right: 16px;
+        bottom: 16px;
+        width: auto;
+      }
     }
   </style>
 </head>
@@ -656,6 +676,8 @@
     </section>
   </div>
 
+  <button id="retryBtn" class="retry-float" type="button" disabled title="タイムアウトなどで取得に失敗した項目だけ再読み込みします">更新</button>
+
   <script>
     const siteUrlInput = document.getElementById("siteUrl");
     const keywordInput = document.getElementById("keywordInput");
@@ -685,6 +707,7 @@
     const resultFilterInput = document.getElementById("resultFilter");
     const mediaFilterEl = document.getElementById("mediaFilter");
     const gridEl = document.getElementById("grid");
+    const retryBtn = document.getElementById("retryBtn");
 
     const LARGE_RANGE_THRESHOLD = 10000;
     const RATE_LIMIT_BACKOFF_MS = 5000;
@@ -706,6 +729,35 @@
     let selectedHistoryDomain = null;
     let historyMutated = false;
     let currentMediaBaseUrl = "";
+    /** @type {Map<string, { baseUrl: string, id: number }>} */
+    let failedFetches = new Map();
+    /** @type {Set<string>} */
+    let failedPreviewIds = new Set();
+
+    function failedFetchKey(baseUrl, id) {
+      return `${baseUrl}:${id}`;
+    }
+
+    function recordFailedFetch(baseUrl, id) {
+      failedFetches.set(failedFetchKey(baseUrl, id), { baseUrl, id });
+      updateRetryButton();
+    }
+
+    function clearFailedLoads() {
+      failedFetches.clear();
+      failedPreviewIds.clear();
+      updateRetryButton();
+    }
+
+    function updateRetryButton() {
+      if (!retryBtn) return;
+      const pending = failedFetches.size + failedPreviewIds.size;
+      retryBtn.textContent = pending > 0 ? `更新 (${pending})` : "更新";
+      retryBtn.disabled = scanBtn.disabled || pending === 0;
+      retryBtn.title = pending > 0
+        ? `取得またはプレビューに失敗した ${pending.toLocaleString()} 件だけ再読み込みします`
+        : "タイムアウトなどで読み込みに失敗した項目があるときだけ押せます";
+    }
 
     function getCacheKey(baseUrl, id) {
       return `${CACHE_PREFIX}${baseUrl}:${id}`;
@@ -1606,9 +1658,14 @@
         : String(foundIds.size);
     }
 
-    function createImagePreview(item, kind) {
+    function createImagePreview(item, kind, card) {
       const previewUrl = kind === "video" ? pickVideoPosterUrl(item) : pickImagePreviewUrl(item);
       if (!previewUrl) return null;
+
+      if (card) {
+        card.dataset.previewUrl = previewUrl;
+        delete card.dataset.previewFailed;
+      }
 
       const link = document.createElement("a");
       link.className = "thumb-link";
@@ -1623,6 +1680,11 @@
       img.src = previewUrl;
       img.alt = decodeTitle(item) || String(item.id);
       img.onerror = () => {
+        if (card) {
+          card.dataset.previewFailed = "1";
+        }
+        failedPreviewIds.add(String(item.id));
+        updateRetryButton();
         const placeholder = document.createElement("div");
         placeholder.className = "thumb-placeholder";
         placeholder.textContent = kind === "video" ? "VIDEO" : "NO IMAGE";
@@ -1630,6 +1692,64 @@
       };
       link.appendChild(img);
       return link;
+    }
+
+    function retryFailedPreviews() {
+      const cards = [...gridEl.querySelectorAll('.card[data-preview-failed="1"]')];
+      let recovered = 0;
+      cards.forEach((card) => {
+        const previewUrl = card.dataset.previewUrl;
+        const idText = card.querySelector(".number-badge")?.textContent?.replace(/^ID\s*/, "") || "";
+        if (!previewUrl) return;
+
+        const link = document.createElement("a");
+        link.className = "thumb-link";
+        const sourceLink = card.querySelector(".info a");
+        link.href = sourceLink?.href || previewUrl;
+        link.target = "_blank";
+        link.rel = "noopener noreferrer";
+
+        const img = document.createElement("img");
+        img.className = "thumb";
+        img.loading = "lazy";
+        img.referrerPolicy = "no-referrer";
+        img.alt = idText ? `ID ${idText}` : "";
+        img.src = `${previewUrl}${previewUrl.includes("?") ? "&" : "?"}retry=${Date.now()}`;
+
+        const placeholder = card.querySelector(".thumb-placeholder");
+        const oldLink = card.querySelector(".thumb-link");
+
+        img.onload = () => {
+          delete card.dataset.previewFailed;
+          if (idText) {
+            failedPreviewIds.delete(idText);
+          }
+          updateRetryButton();
+        };
+
+        img.onerror = () => {
+          card.dataset.previewFailed = "1";
+          if (idText) {
+            failedPreviewIds.add(idText);
+          }
+          updateRetryButton();
+          const failPlaceholder = document.createElement("div");
+          failPlaceholder.className = "thumb-placeholder";
+          failPlaceholder.textContent = placeholder?.textContent || "NO IMAGE";
+          link.replaceWith(failPlaceholder);
+        };
+
+        link.appendChild(img);
+        if (oldLink) {
+          oldLink.replaceWith(link);
+        } else if (placeholder) {
+          placeholder.replaceWith(link);
+        } else {
+          card.prepend(link);
+        }
+        recovered += 1;
+      });
+      return recovered;
     }
 
     function createCard(item) {
@@ -1641,7 +1761,7 @@
       const kind = getMediaKind(item);
 
       if (kind === "image") {
-        const preview = createImagePreview(item, kind);
+        const preview = createImagePreview(item, kind, card);
         if (preview) {
           card.appendChild(preview);
         } else {
@@ -1651,7 +1771,7 @@
           card.appendChild(placeholder);
         }
       } else if (kind === "video") {
-        const poster = createImagePreview(item, kind);
+        const poster = createImagePreview(item, kind, card);
         if (poster) {
           card.appendChild(poster);
         } else {
@@ -1740,6 +1860,7 @@
       foundIds = new Set();
       foundItems = [];
       activeHistoryId = null;
+      clearFailedLoads();
       gridEl.innerHTML = '<div class="empty">チェック中...</div>';
       foundCountEl.textContent = "0";
       cacheCountEl.textContent = "0";
@@ -1776,7 +1897,10 @@
         });
 
         if (isRateLimitedResponse(response)) {
-          if (retryCount >= 5) return false;
+          if (retryCount >= 5) {
+            recordFailedFetch(baseUrl, id);
+            return "fetch_failed";
+          }
           await rateLimiter.reportRateLimit(response);
           if (signal.aborted) return null;
           return fetchMediaById(baseUrl, id, signal, retryCount + 1);
@@ -1784,11 +1908,14 @@
 
         if (response.status === 404) {
           saveCachedMedia(baseUrl, id, { exists: false });
+          failedFetches.delete(failedFetchKey(baseUrl, id));
+          updateRetryButton();
           return false;
         }
 
         if (!response.ok) {
-          return false;
+          recordFailedFetch(baseUrl, id);
+          return "fetch_failed";
         }
 
         const contentType = String(response.headers.get("content-type") || "").toLowerCase();
@@ -1809,13 +1936,16 @@
         }
 
         saveCachedMedia(baseUrl, id, { exists: true, item: slimMediaItem(data, baseUrl) });
+        failedFetches.delete(failedFetchKey(baseUrl, id));
+        updateRetryButton();
         return data;
       } catch (error) {
         if (error?.name === "AbortError") return null;
         if (classifyFetchError(error, url) === "cors_blocked") {
           throw new Error("取得に失敗しました。対象サイトで REST API / CORS 制限がある可能性があります。");
         }
-        throw error;
+        recordFailedFetch(baseUrl, id);
+        return "fetch_failed";
       }
     }
 
@@ -1830,6 +1960,9 @@
 
       const item = await fetchMediaById(baseUrl, id, signal);
       stats.apiFetches += 1;
+      if (item === "fetch_failed") {
+        return { item: null, fromCache: false, failed: true };
+      }
       return { item, fromCache: false };
     }
 
@@ -1968,6 +2101,130 @@
         button.disabled = active;
       });
       progressBarEl.classList.toggle("active", active);
+      updateRetryButton();
+    }
+
+    async function retryFailedLoads() {
+      const apiTargets = [...failedFetches.values()];
+      const previewTargets = failedPreviewIds.size;
+      if (apiTargets.length === 0 && previewTargets === 0) return;
+
+      if (scanController) {
+        scanController.abort();
+      }
+
+      let controller = null;
+      try {
+        const concurrency = parseInt(concurrencyInput.value, 10);
+        const requestIntervalMs = parseInt(requestIntervalInput.value, 10);
+        controller = new AbortController();
+        scanController = controller;
+        const { signal } = controller;
+        rateLimiter = createRateLimiter();
+        setScanning(true);
+
+        let apiRecovered = 0;
+        let apiStillFailed = 0;
+
+        if (apiTargets.length > 0) {
+          setStatus(`${apiTargets.length.toLocaleString()} 件の取得失敗分を再読み込み中...`);
+          progressBarEl.classList.add("active");
+          updateProgress(0, apiTargets.length);
+
+          let index = 0;
+          let done = 0;
+          const stats = { cacheHits: 0, apiFetches: 0 };
+
+          async function retryWorker(workerIndex) {
+            const workerSpacingMs = concurrency > 0
+              ? Math.floor(requestIntervalMs / concurrency)
+              : requestIntervalMs;
+            if (workerSpacingMs > 0 && workerIndex > 0) {
+              await sleep(workerSpacingMs * workerIndex);
+            }
+
+            while (!signal.aborted) {
+              const currentIndex = index;
+              index += 1;
+              if (currentIndex >= apiTargets.length) break;
+
+              const { baseUrl, id } = apiTargets[currentIndex];
+
+              const cached = loadCachedMedia(baseUrl, id);
+              let result;
+              if (cached) {
+                stats.cacheHits += 1;
+                result = cached.exists && cached.item ? cached.item : false;
+                failedFetches.delete(failedFetchKey(baseUrl, id));
+                updateRetryButton();
+              } else {
+                result = await fetchMediaById(baseUrl, id, signal);
+                stats.apiFetches += 1;
+              }
+
+              done += 1;
+              updateProgress(done, apiTargets.length);
+
+              if (result === null) {
+                recordFailedFetch(baseUrl, id);
+                break;
+              }
+
+              if (result && typeof result === "object" && result.source_url) {
+                currentMediaBaseUrl = baseUrl;
+                appendFoundMedia(result, baseUrl);
+                apiRecovered += 1;
+              } else if (result === "fetch_failed") {
+                apiStillFailed += 1;
+              }
+
+              if (!cached && requestIntervalMs > 0 && !signal.aborted && index < apiTargets.length) {
+                await sleep(requestIntervalMs);
+              }
+            }
+          }
+
+          const workers = [];
+          for (let i = 0; i < Math.min(concurrency, apiTargets.length); i += 1) {
+            workers.push(retryWorker(i));
+          }
+          await Promise.all(workers);
+        }
+
+        const previewRetried = retryFailedPreviews();
+        const previewRemaining = failedPreviewIds.size;
+        const apiRemaining = failedFetches.size;
+
+        if (signal.aborted) {
+          setStatus("更新を停止しました。");
+        } else {
+          const parts = [];
+          if (apiTargets.length > 0) {
+            parts.push(`API 再取得 ${apiRecovered.toLocaleString()} 件成功`);
+            if (apiStillFailed > 0 || apiRemaining > 0) {
+              parts.push(`未取得 ${Math.max(apiStillFailed, apiRemaining).toLocaleString()} 件`);
+            }
+          }
+          if (previewTargets > 0) {
+            parts.push(`プレビュー再試行 ${previewRetried.toLocaleString()} 件`);
+            if (previewRemaining > 0) {
+              parts.push(`プレビュー失敗 ${previewRemaining.toLocaleString()} 件`);
+            }
+          }
+          setStatus(parts.length ? `更新完了: ${parts.join(" / ")}` : "再読み込み対象はありません。");
+        }
+      } catch (err) {
+        const message = err instanceof Error ? err.message : String(err);
+        setStatus(`エラー: ${message}`, true);
+      } finally {
+        progressBarEl.classList.remove("active");
+        if (scanController === controller) {
+          setScanning(false);
+          scanController = null;
+          rateLimiter = null;
+        }
+        updateRetryButton();
+      }
     }
 
     async function startScan() {
@@ -2232,6 +2489,7 @@
       resultFilterInput.value = "";
       const allType = document.querySelector('input[name="mediaType"][value="all"]');
       if (allType) allType.checked = true;
+      clearFailedLoads();
       setStatus("");
       setScanning(false);
       renderHistoryList();
@@ -2271,6 +2529,7 @@
     clearBtn.addEventListener("click", clearResults);
     clearCacheBtn.addEventListener("click", clearCache);
     clearHistoryBtn.addEventListener("click", clearHistory);
+    retryBtn.addEventListener("click", retryFailedLoads);
     resultFilterInput.addEventListener("input", applyResultFilter);
     mediaFilterEl.addEventListener("change", applyResultFilter);
     resultFilterInput.addEventListener("keydown", (event) => {
@@ -2309,6 +2568,7 @@
         }
       }
       renderHistoryList();
+      updateRetryButton();
     })();
   </script>
 </body>
